@@ -1,6 +1,6 @@
 python-telegram-bot==21.4
 supabase==2.7.4
-anthropic==0.34.2
+google-generativeai
 APScheduler==3.10.4
 python-dateutil==2.9.0.post0
 pytz==2024.1
