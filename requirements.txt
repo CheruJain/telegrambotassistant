@@ -1,0 +1,8 @@
+python-telegram-bot==21.4
+supabase==2.7.4
+anthropic==0.34.2
+APScheduler==3.10.4
+python-dateutil==2.9.0.post0
+pytz==2024.1
+python-dotenv==1.0.1
+pydantic==2.8.2
