@@ -45,7 +45,7 @@ _HOUR_WORD = re.compile(
 def call_ai_json(
     system_prompt: str,
     user_content: str,
-    max_tokens: int = 800,
+    max_tokens: int = 1600,
 ) -> dict:
     """Single Gemini AI call that must return valid JSON."""
 
@@ -64,12 +64,28 @@ def call_ai_json(
 
     raw = response.text.strip()
 
+    # Be tolerant if the model/client wraps otherwise-valid JSON in a code fence
+    # or adds a small amount of text despite response_mime_type=application/json.
+    cleaned = raw
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+
     try:
-        return json.loads(raw)
-    except json.JSONDecodeError as e:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        # If there is surrounding text, try the first complete JSON object.
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                return json.loads(cleaned[start:end + 1])
+            except json.JSONDecodeError:
+                pass
+
         raise ValueError(
-            f"AI did not return valid JSON: {raw[:300]}"
-        ) from e
+            f"AI did not return valid JSON: {raw[:500]}"
+        )
 
 
 def parse_message(text: str) -> dict:
