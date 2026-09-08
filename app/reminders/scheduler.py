@@ -241,6 +241,21 @@ class ReminderScheduler:
                 today.isoformat(),
                 created_after=cutoff,
             )
+
+            # The 6 AM digest is intentionally silent when nothing new was
+            # added after 9 PM yesterday. Do not send a "No entries found"
+            # message in that case.
+            has_new_entries = any(
+                data.get(key)
+                for key in ("activity", "content", "sales", "meetings", "tasks")
+            )
+            if not has_new_entries:
+                logger.info(
+                    "Skipping morning digest for %s: no new entries after 21:00",
+                    today.isoformat(),
+                )
+                return
+
             await self.bot.send_message(
                 chat_id=self.chat_id,
                 text=self._build_digest_text(
