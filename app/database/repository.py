@@ -207,6 +207,11 @@ def log_sales_call(
     follow_up_date: str | None = None,
     deal_value: float | None = None,
     notes: str | None = None,
+    phone_number: str | None = None,
+    booked_date: str | None = None,
+    booked_time: str | None = None,
+    call_type: str | None = None,
+    confirmation_reminder_sent: bool = False,
 ) -> dict:
     db = get_client()
     payload = {
@@ -220,6 +225,11 @@ def log_sales_call(
         "follow_up_date": follow_up_date,
         "deal_value": deal_value,
         "notes": notes,
+        "phone_number": phone_number,
+        "booked_date": booked_date,
+        "booked_time": booked_time,
+        "call_type": call_type,
+        "confirmation_reminder_sent": confirmation_reminder_sent,
     }
     res = db.table("sales_calls").insert(payload).execute()
     return res.data[0]
