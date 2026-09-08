@@ -57,6 +57,8 @@ Return this exact JSON shape (omit fields you have no info for, use null):
     "title": "<short title, e.g. 'Sales call with Rahul'>",
     "person": "<name or null>",
     "meeting_type": "sales_call|content_meeting|other",
+    "phone_number": "<string or null, only when scheduling a sales call and the user provides it>",
+    "call_type": "Discovery|Follow Up|Demo|Closing|Other|null",
     "search_text": "<name/keyword to find an EXISTING meeting for update/cancel intents>",
     "new_time_expression": "<verbatim new time phrase for update_meeting, or null>"
   },
@@ -79,6 +81,7 @@ Rules:
   do not guess an exact date/time yourself, that is handled by other code.
 - Quantity defaults to 1 if the user implies a single post but doesn't state a number.
 - If a sales call is booked with a specific person, extract lead_name, phone_number, call_type, booked_date, and booked_time when present.
+- If a booked sales call is expressed as a meeting/scheduling request, use create_meeting with meeting_type sales_call and extract phone_number and call_type in meeting when present.
 - Only extract phone_number when the user provides it. Never invent or infer a phone number.
 - For normal sales-call activity without a booked call, leave phone_number, booked_date, booked_time, and call_type as null.
 - Keep "notes" short (<200 chars) or null.
