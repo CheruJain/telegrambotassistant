@@ -1,5 +1,5 @@
 """
-Deterministic slash-commands. These never call the AI - they just query the DB and format a response.
+Deterministic slash-commands. These never call the AI.
 """
 from __future__ import annotations
 
@@ -23,14 +23,21 @@ def _tz(user: dict) -> pytz.BaseTzInfo:
     return pytz.timezone(user.get("timezone") or settings.DEFAULT_TIMEZONE)
 
 
+def _local_dt(value: str, tz):
+    start = dt.datetime.fromisoformat(value)
+    if start.tzinfo is None:
+        start = pytz.utc.localize(start)
+    return start.astimezone(tz)
+
+
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = _get_user(update)
     await update.message.reply_text(
         f"Hey {user.get('name') or ''}! I'm your personal work & sales assistant.\n\n"
         "Just talk to me naturally, e.g.:\n"
-        "• \"Aaj 40 sales calls hui, 7 interested\"\n"
-        "• \"Kal 4 baje Rahul ke saath call hai\"\n"
-        "• \"LinkedIn pe ek post kari\"\n\n"
+        "\"Aaj 40 sales calls hui, 7 interested\"\n"
+        "\"Kal 4 baje Rahul ke saath call hai\"\n"
+        "\"LinkedIn pe ek post kari\"\n\n"
         "Or use /help to see all commands."
     )
 
@@ -44,10 +51,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/reminders - pending reminders\n"
         "/pending - pending follow-ups\n"
         "/followups - same as /pending\n"
-        "/stats - quick stats for this week\n\n"
-        "Otherwise, just type naturally in English/Hindi/Hinglish - I'll understand:\n"
-        "logging work, content, sales calls, creating/updating/cancelling meetings and "
-        "reminders, and asking questions about your performance."
+        "/stats - quick stats for this week"
     )
 
 
@@ -70,13 +74,16 @@ def _format_daily(data: dict, today: dt.date) -> str:
         lines.append("  • Nothing logged yet")
     lines.append("")
     lines.append("Sales:")
-    lines.append(f"  • Calls: {s['total_calls']}  Interested: {s['interested']}  "
-                  f"Follow-ups: {s['follow_ups']}  Won: {s['won']}")
+    lines.append(f"  • Calls: {s['total_calls']}  Interested: {s['interested']}  Follow-ups: {s['follow_ups']}  Won: {s['won']}")
     lines.append("")
     lines.append("Meetings:")
     if data["meetings"]:
         for m in data["meetings"]:
-            t = dt.datetime.fromisoformat(m["start_time"]).strftime("%I:%M %p").lstrip("0")
+            start = dt.datetime.fromisoformat(m["start_time"])
+            if start.tzinfo is None:
+                start = pytz.utc.localize(start)
+            start = start.astimezone(pytz.timezone(settings.DEFAULT_TIMEZONE))
+            t = start.strftime("%I:%M %p").lstrip("0")
             lines.append(f"  • {t} — {m['title']}")
     else:
         lines.append("  • None remaining today")
@@ -89,10 +96,10 @@ def _format_daily(data: dict, today: dt.date) -> str:
 
 async def summary_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = _get_user(update)
-    today = dt.datetime.now(_tz(user)).date()
+    tz = _tz(user)
+    today = dt.datetime.now(tz).date()
     await update.message.reply_text("Crunching this week's numbers…")
-    text = format_weekly_report(user["id"], today)
-    await update.message.reply_text(text)
+    await update.message.reply_text(format_weekly_report(user["id"], today))
 
 
 async def meetings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -107,16 +114,21 @@ async def meetings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = ["UPCOMING MEETINGS (next 7 days)", ""]
     current_day = None
     for m in meetings:
-        start = dt.datetime.fromisoformat(m["start_time"])
-        if start.tzinfo is None:
-            start = pytz.utc.localize(start).astimezone(tz)
+        start = _local_dt(m["start_time"], tz)
         day_label = start.strftime("%d-%b-%Y")
         if day_label != current_day:
             lines.append(f"\n{day_label}")
             current_day = day_label
         time_label = start.strftime("%I:%M %p").lstrip("0")
-        who = f" with {m['person']}" if m.get("person") else ""
-        lines.append(f"  {time_label} — {m['title']}{who}")
+        title = m.get("title") or "Meeting"
+        person = (m.get("person") or "").strip()
+        if person and person.lower() in title.lower():
+            display = title
+        elif person:
+            display = f"{title} with {person}"
+        else:
+            display = title
+        lines.append(f"  {time_label} — {display}")
     await update.message.reply_text("\n".join(lines))
 
 
@@ -127,17 +139,10 @@ async def reminders_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not reminders:
         await update.message.reply_text("No pending reminders.")
         return
-
     lines = ["PENDING REMINDERS", ""]
     for reminder in reminders:
-        trigger = dt.datetime.fromisoformat(reminder["trigger_time"])
-        if trigger.tzinfo is None:
-            trigger = pytz.utc.localize(trigger)
-        trigger = trigger.astimezone(tz)
-        lines.append(
-            f"• {trigger.strftime('%d-%b-%Y')} at {trigger.strftime('%I:%M %p').lstrip('0')} — "
-            f"{reminder.get('reminder_text') or 'Reminder'}"
-        )
+        trigger = _local_dt(reminder["trigger_time"], tz)
+        lines.append(f"• {trigger.strftime('%d-%b-%Y')} at {trigger.strftime('%I:%M %p').lstrip('0')} — {reminder.get('reminder_text') or 'Reminder'}")
     await update.message.reply_text("\n".join(lines))
 
 
@@ -149,12 +154,7 @@ async def pending_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     lines = ["PENDING FOLLOW-UPS", ""]
     for f in followups:
-        lines.append(
-            f"  • {f.get('lead_name') or 'Unknown lead'} — "
-            f"follow-up on {f.get('follow_up_date') or '?'} "
-            f"(source: {f.get('source') or '?'}, status: {f.get('outcome') or '?'}"
-            f"{', ₹%s' % f['deal_value'] if f.get('deal_value') else ''})"
-        )
+        lines.append(f"  • {f.get('lead_name') or 'Unknown lead'} — follow-up on {f.get('follow_up_date') or '?'} (source: {f.get('source') or '?'}, status: {f.get('outcome') or '?'})")
     await update.message.reply_text("\n".join(lines))
 
 
@@ -164,14 +164,7 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     today = dt.datetime.now(tz).date()
     start, end = week_bounds(today)
     from app.analytics.metrics import sales_summary, content_summary
-
     s = sales_summary(user["id"], start, end)
     c = content_summary(user["id"], start, end)
-    lines = [
-        f"STATS ({start.strftime('%d-%b-%Y')} → {end.strftime('%d-%b-%Y')})",
-        "",
-        f"Calls: {s['total_calls']}  |  Interested: {s['interested']}  |  Won: {s['won']}",
-        f"Conversion: {s['conversion_rate_pct']}%  |  Revenue: ₹{s['revenue_won']:,.0f}",
-        f"Content posted: {sum(c['by_platform_account'].values())}  |  Reach: {c['total_reach']}",
-    ]
+    lines = [f"STATS ({start.strftime('%d-%b-%Y')} → {end.strftime('%d-%b-%Y')})", "", f"Calls: {s['total_calls']} | Interested: {s['interested']} | Won: {s['won']}", f"Conversion: {s['conversion_rate_pct']}% | Revenue: ₹{s['revenue_won']:,.0f}", f"Content posted: {sum(c['by_platform_account'].values())} | Reach: {c['total_reach']}"]
     await update.message.reply_text("\n".join(lines))
