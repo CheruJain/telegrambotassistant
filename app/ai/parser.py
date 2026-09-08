@@ -45,9 +45,13 @@ _HOUR_WORD = re.compile(
 def call_ai_json(
     system_prompt: str,
     user_content: str,
-    max_tokens: int = 1600,
+    max_tokens: int = 4096,
 ) -> dict:
-    """Single Gemini AI call that must return valid JSON."""
+    """Single Gemini AI call that must return valid JSON.
+
+    The parser returns a fairly large structured object. Keep enough output
+    budget for Gemini to finish the JSON instead of truncating it mid-field.
+    """
 
     model = genai.GenerativeModel(
         model_name=settings.AI_MODEL,
