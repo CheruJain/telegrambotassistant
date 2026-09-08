@@ -1,6 +1,5 @@
 """
-Deterministic slash-commands. These never call the AI (spec section 28) -
-they just query the DB and format a response.
+Deterministic slash-commands. These never call the AI - they just query the DB and format a response.
 """
 from __future__ import annotations
 
@@ -42,6 +41,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/today - today's summary\n"
         "/summary - this week's performance + AI insights\n"
         "/meetings - upcoming meetings\n"
+        "/reminders - pending reminders\n"
         "/pending - pending follow-ups\n"
         "/followups - same as /pending\n"
         "/stats - quick stats for this week\n\n"
@@ -61,7 +61,7 @@ async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def _format_daily(data: dict, today: dt.date) -> str:
     c, s = data["content"], data["sales"]
-    lines = [f"📅 TODAY ({today.isoformat()})", ""]
+    lines = [f"TODAY ({today.strftime('%d-%b-%Y')})", ""]
     lines.append("Content:")
     if c["by_platform_account"]:
         for k, v in c["by_platform_account"].items():
@@ -89,8 +89,7 @@ def _format_daily(data: dict, today: dt.date) -> str:
 
 async def summary_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = _get_user(update)
-    tz = _tz(user)
-    today = dt.datetime.now(tz).date()
+    today = dt.datetime.now(_tz(user)).date()
     await update.message.reply_text("Crunching this week's numbers…")
     text = format_weekly_report(user["id"], today)
     await update.message.reply_text(text)
@@ -105,13 +104,13 @@ async def meetings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not meetings:
         await update.message.reply_text("No upcoming meetings in the next 7 days.")
         return
-    lines = ["📅 UPCOMING MEETINGS (next 7 days)", ""]
+    lines = ["UPCOMING MEETINGS (next 7 days)", ""]
     current_day = None
     for m in meetings:
         start = dt.datetime.fromisoformat(m["start_time"])
         if start.tzinfo is None:
             start = pytz.utc.localize(start).astimezone(tz)
-        day_label = start.strftime("%A, %d %b")
+        day_label = start.strftime("%d-%b-%Y")
         if day_label != current_day:
             lines.append(f"\n{day_label}")
             current_day = day_label
@@ -121,13 +120,34 @@ async def meetings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
+async def reminders_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = _get_user(update)
+    tz = _tz(user)
+    reminders = repo.get_pending_reminders(user["id"])
+    if not reminders:
+        await update.message.reply_text("No pending reminders.")
+        return
+
+    lines = ["PENDING REMINDERS", ""]
+    for reminder in reminders:
+        trigger = dt.datetime.fromisoformat(reminder["trigger_time"])
+        if trigger.tzinfo is None:
+            trigger = pytz.utc.localize(trigger)
+        trigger = trigger.astimezone(tz)
+        lines.append(
+            f"• {trigger.strftime('%d-%b-%Y')} at {trigger.strftime('%I:%M %p').lstrip('0')} — "
+            f"{reminder.get('reminder_text') or 'Reminder'}"
+        )
+    await update.message.reply_text("\n".join(lines))
+
+
 async def pending_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = _get_user(update)
     followups = repo.get_pending_followups(user["id"])
     if not followups:
-        await update.message.reply_text("No pending follow-ups. 🎉")
+        await update.message.reply_text("No pending follow-ups.")
         return
-    lines = ["📋 PENDING FOLLOW-UPS", ""]
+    lines = ["PENDING FOLLOW-UPS", ""]
     for f in followups:
         lines.append(
             f"  • {f.get('lead_name') or 'Unknown lead'} — "
@@ -148,7 +168,7 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     s = sales_summary(user["id"], start, end)
     c = content_summary(user["id"], start, end)
     lines = [
-        f"📈 STATS ({start.isoformat()} → {end.isoformat()})",
+        f"STATS ({start.strftime('%d-%b-%Y')} → {end.strftime('%d-%b-%Y')})",
         "",
         f"Calls: {s['total_calls']}  |  Interested: {s['interested']}  |  Won: {s['won']}",
         f"Conversion: {s['conversion_rate_pct']}%  |  Revenue: ₹{s['revenue_won']:,.0f}",
