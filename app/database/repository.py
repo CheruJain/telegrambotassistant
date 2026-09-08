@@ -448,3 +448,75 @@ def get_pending_reminders(user_id: str) -> list[dict]:
         .execute()
     )
     return res.data
+
+
+# ------------------------------------------------------------------
+# assigned_tasks / daily digest
+# ------------------------------------------------------------------
+def get_assigned_tasks_for_date(
+    user_id: str, assigned_date: str, created_after: str | None = None
+) -> list[dict]:
+    db = get_client()
+    q = (
+        db.table("assigned_tasks")
+        .select("*")
+        .eq("user_id", user_id)
+        .eq("assigned_date", assigned_date)
+        .order("created_at")
+    )
+    if created_after:
+        q = q.gte("created_at", created_after)
+    return q.execute().data
+
+
+def get_daily_digest_data(
+    user_id: str,
+    target_date: str,
+    created_after: str | None = None,
+) -> dict:
+    db = get_client()
+
+    activity_q = (
+        db.table("daily_activity")
+        .select("*")
+        .eq("user_id", user_id)
+        .eq("date", target_date)
+        .order("created_at")
+    )
+    content_q = (
+        db.table("content")
+        .select("*")
+        .eq("user_id", user_id)
+        .eq("post_date", target_date)
+        .order("created_at")
+    )
+    sales_q = (
+        db.table("sales_calls")
+        .select("*")
+        .eq("user_id", user_id)
+        .eq("date", target_date)
+        .order("created_at")
+    )
+    meetings_q = (
+        db.table("meetings")
+        .select("*")
+        .eq("user_id", user_id)
+        .gte("start_time", f"{target_date}T00:00:00")
+        .lt("start_time", f"{(dt.date.fromisoformat(target_date) + dt.timedelta(days=1)).isoformat()}T00:00:00")
+        .neq("status", "cancelled")
+        .order("start_time")
+    )
+
+    if created_after:
+        activity_q = activity_q.gte("created_at", created_after)
+        content_q = content_q.gte("created_at", created_after)
+        sales_q = sales_q.gte("created_at", created_after)
+        meetings_q = meetings_q.gte("created_at", created_after)
+
+    return {
+        "activity": activity_q.execute().data,
+        "content": content_q.execute().data,
+        "sales": sales_q.execute().data,
+        "meetings": meetings_q.execute().data,
+        "tasks": get_assigned_tasks_for_date(user_id, target_date, created_after),
+    }
