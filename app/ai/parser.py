@@ -36,10 +36,13 @@ _WEEKDAYS = {
     "sunday": SU, "sun": SU, "raviwar": SU, "ravivar": SU,
 }
 
+# Prefer an explicit clock marker (6pm, 11:30 am, 4 baje). A bare number
+# such as the "15" in "15 sep" is a calendar date, not a clock time.
 _HOUR_WORD = re.compile(
-    r"(\d{1,2})(?::(\d{2}))?\s*(am|pm|baje)?",
+    r"(\d{1,2})(?::(\d{2}))?\s*(am|pm|baje)\b",
     re.IGNORECASE,
 )
+_BARE_HOUR = re.compile(r"\b(\d{1,2})(?::(\d{2}))?\s*o['’]?clock\b", re.IGNORECASE)
 
 
 def call_ai_json(
@@ -47,11 +50,7 @@ def call_ai_json(
     user_content: str,
     max_tokens: int = 4096,
 ) -> dict:
-    """Single Gemini AI call that must return valid JSON.
-
-    The parser returns a fairly large structured object. Keep enough output
-    budget for Gemini to finish the JSON instead of truncating it mid-field.
-    """
+    """Single Gemini AI call that must return valid JSON."""
 
     model = genai.GenerativeModel(
         model_name=settings.AI_MODEL,
@@ -68,8 +67,6 @@ def call_ai_json(
 
     raw = response.text.strip()
 
-    # Be tolerant if the model/client wraps otherwise-valid JSON in a code fence
-    # or adds a small amount of text despite response_mime_type=application/json.
     cleaned = raw
     if cleaned.startswith("```"):
         cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
@@ -78,7 +75,6 @@ def call_ai_json(
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError:
-        # If there is surrounding text, try the first complete JSON object.
         start = cleaned.find("{")
         end = cleaned.rfind("}")
         if start >= 0 and end > start:
@@ -87,9 +83,7 @@ def call_ai_json(
             except json.JSONDecodeError:
                 pass
 
-        raise ValueError(
-            f"AI did not return valid JSON: {raw[:500]}"
-        )
+        raise ValueError(f"AI did not return valid JSON: {raw[:500]}")
 
 
 def parse_message(text: str) -> dict:
@@ -107,10 +101,7 @@ def resolve_datetime(
     default_hour: int = 9,
     now: Optional[dt.datetime] = None,
 ) -> Optional[dt.datetime]:
-    """
-    Resolves a Hindi/English/Hinglish date-time phrase into a
-    timezone-aware datetime.
-    """
+    """Resolve a Hindi/English/Hinglish date-time phrase."""
 
     if not phrase or not phrase.strip():
         return None
@@ -122,117 +113,86 @@ def resolve_datetime(
         now = tz.localize(now)
 
     p = phrase.strip().lower()
-
     base_date = now.date()
     time_part: Optional[dt.time] = None
 
     # --- relative day words ---
-
     if "parso" in p or ("din baad" in p and "2" in p):
         base_date = now.date() + dt.timedelta(days=2)
-
     elif "aaj" in p or "today" in p:
         base_date = now.date()
-
     elif "kal" in p:
-        # "kal" is ambiguous in Hindi.
-        # For scheduling, assume tomorrow.
         base_date = now.date() + dt.timedelta(days=1)
-
     elif "tomorrow" in p:
         base_date = now.date() + dt.timedelta(days=1)
-
     elif "yesterday" in p:
         base_date = now.date() - dt.timedelta(days=1)
 
     # --- "in N minutes/hours" ---
-
     m = re.search(
-        r"(\d+)\s*(minute|min|hour|hr|ghante|ghanta)s?"
-        r"\s*(mein|me|later|from now)?",
+        r"(\d+)\s*(minute|min|hour|hr|ghante|ghanta)s?\s*(mein|me|later|from now)?",
         p,
     )
-
     if m:
         qty = int(m.group(1))
         unit = m.group(2)
-
-        if unit.startswith("min"):
-            delta = dt.timedelta(minutes=qty)
-        else:
-            delta = dt.timedelta(hours=qty)
-
+        delta = dt.timedelta(minutes=qty) if unit.startswith("min") else dt.timedelta(hours=qty)
         return now + delta
 
     # --- weekday names ---
-
     for word, wk in _WEEKDAYS.items():
-
         if re.search(rf"\b{word}\b", p):
-
             candidate = now + relativedelta(weekday=wk(0))
-
-            if candidate.date() == now.date() and time_part is None:
-                pass
-
             base_date = candidate.date()
             break
 
     # --- explicit clock time ---
-
-    hm = _HOUR_WORD.search(p)
-
+    # Never interpret the day number in a date such as "15 sep" as a time.
+    hm = _HOUR_WORD.search(p) or _BARE_HOUR.search(p)
     if hm and hm.group(1):
-
         hour = int(hm.group(1))
         minute = int(hm.group(2)) if hm.group(2) else 0
-
-        meridiem = (hm.group(3) or "").lower()
+        meridiem = (hm.group(3) or "").lower() if hm.lastindex and hm.lastindex >= 3 else ""
 
         if meridiem == "pm" and hour < 12:
             hour += 12
-
         elif meridiem == "am" and hour == 12:
             hour = 0
-
         elif meridiem in ("", "baje") and hour <= 7:
-            # Example: "4 baje" -> 4 PM
             hour += 12
 
-        time_part = dt.time(
-            hour=hour,
-            minute=minute,
-        )
+        time_part = dt.time(hour=hour, minute=minute)
+
+    # If we have an explicit clock plus an explicit calendar date, parse the
+    # date portion separately. This fixes phrases such as "15 sep ko 6pm".
+    if time_part is not None and not any(word in p for word in ("kal", "tomorrow", "yesterday", "aaj", "today", "parso")):
+        try:
+            date_phrase = _HOUR_WORD.sub(" ", p)
+            date_phrase = _BARE_HOUR.sub(" ", date_phrase)
+            parsed = dateparser.parse(
+                date_phrase,
+                fuzzy=True,
+                default=now.replace(tzinfo=None),
+            )
+            if parsed is not None and re.search(r"\b\d{1,2}\s*(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)", p):
+                base_date = parsed.date()
+        except (ValueError, OverflowError, TypeError):
+            pass
 
     if time_part is None:
-
-        # Last-resort generic date parser
         try:
             parsed = dateparser.parse(
                 phrase,
                 fuzzy=True,
                 default=now.replace(tzinfo=None),
             )
+            if parsed is not None:
+                candidate = tz.localize(parsed) if parsed.tzinfo is None else parsed
+                return candidate
+        except (ValueError, OverflowError, TypeError):
+            time_part = dt.time(hour=default_hour, minute=0)
 
-            candidate = (
-                tz.localize(parsed)
-                if parsed.tzinfo is None
-                else parsed
-            )
-
-            return candidate
-
-        except (ValueError, OverflowError):
-            time_part = dt.time(
-                hour=default_hour,
-                minute=0,
-            )
-
-    naive = dt.datetime.combine(
-        base_date,
-        time_part,
-    )
-
+    naive = dt.datetime.combine(base_date, time_part)
     return tz.localize(naive)
 
 
