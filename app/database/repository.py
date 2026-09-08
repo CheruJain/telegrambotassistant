@@ -78,7 +78,17 @@ def get_next_meeting(user_id:str)->dict|None:
     res=get_client().table("meetings").select("*").eq("user_id",user_id).neq("status","cancelled").gte("start_time",dt.datetime.utcnow().isoformat()).order("start_time").limit(1).execute(); return res.data[0] if res.data else None
 
 def create_reminder(user_id:str,reminder_text:str,trigger_time_iso:str,related_meeting_id:str|None=None,recurrence:str|None=None)->dict:
-    res=get_client().table("reminders").insert({"user_id":user_id,"reminder_text":reminder_text,"trigger_time":trigger_time_iso,"related_meeting_id":related_meeting_id,"recurrence":recurrence,"status":"pending"}).execute(); return res.data[0]
+    db=get_client()
+    final_text=reminder_text
+    try:
+        trigger_date=dt.datetime.fromisoformat(trigger_time_iso).date().isoformat()
+        rows=(db.table("sales_calls").select("lead_name,phone_number,booked_date").eq("user_id",user_id).eq("booked_date",trigger_date).eq("outcome","Booked").execute().data)
+        matches=[r for r in rows if r.get("lead_name") and r.get("lead_name").lower() in reminder_text.lower() and r.get("phone_number")]
+        if len(matches)==1:
+            final_text=f"{reminder_text}\nPhone: {matches[0]['phone_number']}"
+    except Exception:
+        pass
+    res=db.table("reminders").insert({"user_id":user_id,"reminder_text":final_text,"trigger_time":trigger_time_iso,"related_meeting_id":related_meeting_id,"recurrence":recurrence,"status":"pending"}).execute(); return res.data[0]
 
 def cancel_reminders_for_meeting(meeting_id:str)->None:get_client().table("reminders").update({"status":"cancelled"}).eq("related_meeting_id",meeting_id).eq("status","pending").execute()
 def get_due_reminders(as_of_iso:str)->list[dict]:return get_client().table("reminders").select("*").eq("status","pending").lte("trigger_time",as_of_iso).execute().data
