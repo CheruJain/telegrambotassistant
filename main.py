@@ -16,6 +16,7 @@ from app.config.settings import settings
 from app.database import repository as repo
 from app.bot import commands as cmd
 from app.bot.handlers import handle_text_message, handle_voice_message
+from app.bot.sales_update_handler import handle_possible_sales_update
 from app.reminders.scheduler import ReminderScheduler
 
 logging.basicConfig(
@@ -53,6 +54,12 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("stats", cmd.stats_cmd))
 
     application.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
+    # Handle simple booked-call detail updates before the general AI router.
+    sales_update_filter = filters.Regex(
+        r"(?i)\b(?:update|change|edit)\b.*\b(?:phone|number|call|type|status)\b"
+        r"|\b(?:ka|ki|ke)\s+(?:number|phone|call|status|type)\b"
+    )
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & sales_update_filter, handle_possible_sales_update))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 
     return application
