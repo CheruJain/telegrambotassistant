@@ -64,6 +64,8 @@ Return this exact JSON shape (omit fields you have no info for, use null):
   },
   "reminder": {
     "text": "<what to remind about>",
+    "lead_name": "<lead/person name if the reminder is about a specific lead, otherwise null>",
+    "phone_number": "<phone number if the user provides it, otherwise null>",
     "search_text": "<keyword to find existing reminder for update/cancel>",
     "recurrence": "none|daily|weekly:mon|weekly:tue|weekly:wed|weekly:thu|weekly:fri|weekly:sat|weekly:sun",
     "offset_before_meeting_minutes": <int or null, only if this is a custom reminder offset for a meeting just created>
@@ -84,6 +86,7 @@ Rules:
 - If a booked sales call is expressed as a meeting/scheduling request, use create_meeting with meeting_type sales_call and extract phone_number and call_type in meeting when present.
 - Only extract phone_number when the user provides it. Never invent or infer a phone number.
 - For normal sales-call activity without a booked call, leave phone_number, booked_date, booked_time, and call_type as null.
+- For a reminder about a specific person/lead, extract that person's lead_name. If the user explicitly gives their phone number in the same message, extract it as reminder.phone_number.
 - Keep "notes" short (<200 chars) or null.
 """
 
