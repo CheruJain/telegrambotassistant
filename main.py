@@ -48,6 +48,7 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("today", cmd.today_cmd))
     application.add_handler(CommandHandler("summary", cmd.summary_cmd))
     application.add_handler(CommandHandler("meetings", cmd.meetings_cmd))
+    application.add_handler(CommandHandler("reminders", cmd.reminders_cmd))
     application.add_handler(CommandHandler("pending", cmd.pending_cmd))
     application.add_handler(CommandHandler("followups", cmd.pending_cmd))
     application.add_handler(CommandHandler("stats", cmd.stats_cmd))
