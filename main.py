@@ -26,7 +26,6 @@ logger = logging.getLogger(__name__)
 
 
 async def _post_init(application: Application):
-    # Ensure the configured user exists in the DB, then start the scheduler.
     user = repo.get_or_create_user(settings.TELEGRAM_USER_ID, settings.USER_NAME)
     tz_name = user.get("timezone") or settings.DEFAULT_TIMEZONE
 
@@ -54,10 +53,12 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("stats", cmd.stats_cmd))
 
     application.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
-    # Handle simple booked-call detail updates before the general AI router.
+    # Handle simple booked-call detail updates and cancellations before the general AI router.
     sales_update_filter = filters.Regex(
         r"(?i)\b(?:update|change|edit)\b.*\b(?:phone|number|call|type|status)\b"
         r"|\b(?:ka|ki|ke)\s+(?:number|phone|call|status|type)\b"
+        r"|\b(?:cancel|cancelled|canceled)\b.*\b(?:meeting|call)\b"
+        r"|\b(?:meeting|call)\b.*\b(?:cancel|cancelled|canceled)\b"
     )
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & sales_update_filter, handle_possible_sales_update))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
