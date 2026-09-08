@@ -299,8 +299,13 @@ async def _handle_create_meeting(message, user, tz, parsed):
     day_label = start.strftime("%A, %d %b")
     time_label = start.strftime("%I:%M %p").lstrip("0")
     reminder_label = reminder_time.strftime("%I:%M %p").lstrip("0")
+    phone_label = (
+        f"\nPhone: {meeting['phone_number']}"
+        if is_sales_call and meeting.get("phone_number")
+        else ""
+    )
     await message.reply_text(
-        f"Added:\n{day_label}, {time_label}\n{title}\n\n{reminder_prefix}: {reminder_label}"
+        f"Added:\n{day_label}, {time_label}\n{title}{phone_label}\n\n{reminder_prefix}: {reminder_label}"
     )
 
 
@@ -378,113 +383,126 @@ async def _handle_upcoming_meetings(message, user, tz, parsed):
         mt = dt.datetime.fromisoformat(m["start_time"])
         if mt.tzinfo is None:
             mt = pytz.utc.localize(mt).astimezone(tz)
-        label = mt.strftime("%d %b, %I:%M %p").replace(" 0", " ")
-        who = f" with {m['person']}" if m.get("person") else ""
-        lines.append(f"{label} — {m['title']}{who}")
-    await message.reply_text("\n".join(lines))
+        lines.append(f"{mt.strftime('%a %d %b, %I:%M %p').replace(' 0', ' ')} — {m['title']}")
+
+    await message.reply_text("Upcoming:\n" + "\n".join(lines))
 
 
 # ------------------------------------------------------------------
 # Reminders
 # ------------------------------------------------------------------
 async def _handle_create_reminder(message, user, tz, parsed):
-    reminder_info = parsed.get("reminder") or {}
-    text = reminder_info.get("text") or "Reminder"
+    reminder = parsed.get("reminder") or {}
     date_expr = parsed.get("date_expression")
     trigger = resolve_datetime(date_expr, tz.zone, now=dt.datetime.now(tz))
-
     if trigger is None:
-        await message.reply_text("When should I remind you? (e.g. 'kal 10 baje' or '30 minutes mein')")
+        await message.reply_text("When should I remind you?")
         return
 
-    recurrence = reminder_info.get("recurrence")
-    if recurrence in ("none", None, ""):
-        recurrence = None
-
+    reminder_text = reminder.get("text") or "Reminder"
+    recurrence = reminder.get("recurrence") or "none"
     repo.create_reminder(
         user_id=user["id"],
-        reminder_text=text,
+        reminder_text=reminder_text,
         trigger_time_iso=trigger.isoformat(),
         recurrence=recurrence,
     )
-    label = trigger.strftime("%d %b, %I:%M %p").replace(" 0", " ")
-    recur_label = f" (repeats: {recurrence})" if recurrence else ""
-    await message.reply_text(f"Reminder set for {label}{recur_label}: {text}")
+    await message.reply_text(f"Reminder set for {trigger.strftime('%A, %d %b %I:%M %p').replace(' 0', ' ')}.")
 
 
 async def _handle_update_reminder(message, user, tz, parsed):
-    reminder_info = parsed.get("reminder") or {}
-    search_text = reminder_info.get("search_text") or reminder_info.get("text")
-    pending = repo.get_pending_reminders(user["id"])
-    matches = [r for r in pending if search_text and search_text.lower() in r["reminder_text"].lower()]
+    reminder = parsed.get("reminder") or {}
+    search_text = reminder.get("search_text") or reminder.get("text")
+    if not search_text:
+        await message.reply_text("Which reminder should I update? Please mention its text.")
+        return
+    matches = repo.find_pending_reminder(user["id"], search_text)
     if not matches:
         await message.reply_text(f"I couldn't find a pending reminder matching '{search_text}'.")
         return
     target = matches[0]
-
-    new_time = resolve_datetime(parsed.get("date_expression"), tz.zone, now=dt.datetime.now(tz))
-    if new_time is None:
-        await message.reply_text("What's the new time for that reminder?")
+    date_expr = reminder.get("new_time_expression") or parsed.get("date_expression")
+    trigger = resolve_datetime(date_expr, tz.zone, now=dt.datetime.now(tz))
+    if trigger is None:
+        await message.reply_text("What's the new reminder time?")
         return
-
-    repo.cancel_reminder(target["id"])
-    repo.create_reminder(
-        user_id=user["id"],
-        reminder_text=target["reminder_text"],
-        trigger_time_iso=new_time.isoformat(),
-        recurrence=target.get("recurrence"),
-    )
-    label = new_time.strftime("%d %b, %I:%M %p").replace(" 0", " ")
-    await message.reply_text(f"Updated reminder to {label}.")
+    repo.update_reminder(target["id"], trigger_time_iso=trigger.isoformat())
+    await message.reply_text(f"Updated reminder to {trigger.strftime('%A, %d %b %I:%M %p').replace(' 0', ' ')}.")
 
 
 async def _handle_cancel_reminder(message, user, tz, parsed):
-    reminder_info = parsed.get("reminder") or {}
-    search_text = reminder_info.get("search_text") or reminder_info.get("text")
-    pending = repo.get_pending_reminders(user["id"])
-    matches = [r for r in pending if search_text and search_text.lower() in r["reminder_text"].lower()]
+    reminder = parsed.get("reminder") or {}
+    search_text = reminder.get("search_text") or reminder.get("text")
+    if not search_text:
+        await message.reply_text("Which reminder should I cancel? Please mention its text.")
+        return
+    matches = repo.find_pending_reminder(user["id"], search_text)
     if not matches:
         await message.reply_text(f"I couldn't find a pending reminder matching '{search_text}'.")
         return
-    repo.cancel_reminder(matches[0]["id"])
-    await message.reply_text(f"Cancelled reminder: {matches[0]['reminder_text']}.")
+    target = matches[0]
+    repo.mark_reminder_sent(target["id"])
+    await message.reply_text(f"Cancelled reminder: {target['reminder_text']}.")
 
 
 # ------------------------------------------------------------------
-# Follow-ups / stats / objections
+# Follow-ups / queries
 # ------------------------------------------------------------------
 async def _handle_pending_followups(message, user):
     followups = repo.get_pending_followups(user["id"])
     if not followups:
         await message.reply_text("No pending follow-ups.")
         return
-    lines = ["PENDING FOLLOW-UPS", ""]
-    for f in followups:
-        lines.append(
-            f"  • {f.get('lead_name') or 'Unknown lead'} — follow-up {f.get('follow_up_date') or '?'} "
-            f"(source: {f.get('source') or '?'}, status: {f.get('outcome') or '?'})"
-        )
-    await message.reply_text("\n".join(lines))
+    lines = []
+    for s in followups:
+        name = s.get("lead_name") or "Unknown"
+        date = s.get("follow_up_date") or "No date"
+        lines.append(f"• {name} — follow up: {date}")
+    await message.reply_text("Pending follow-ups:\n" + "\n".join(lines))
 
 
 async def _handle_query_stats(message, user, tz, parsed, raw_text):
     query = parsed.get("query") or {}
-    topic = query.get("topic", "general")
-    today = dt.datetime.now(tz).date()
+    metric = query.get("metric")
+    start_expr = query.get("start_date") or parsed.get("date_expression")
+    end_expr = query.get("end_date")
 
-    if topic == "objections":
-        start, end = week_bounds(today)
-        objections = objections_list(user["id"], today - dt.timedelta(days=30), today)
-        if not objections:
-            await message.reply_text("Not enough data yet to identify objection patterns.")
-            return
-        answer = answer_objection_question(raw_text, objections)
-        await message.reply_text(answer)
-        return
-
-    period = query.get("period") or "this_week"
-    if period == "today":
-        data = daily_summary_data(user["id"], today)
-        await message.reply_text(_format_daily(data, today))
+    now = dt.datetime.now(tz)
+    start = resolve_datetime(start_expr, tz.zone, now=now) if start_expr else None
+    end = resolve_datetime(end_expr, tz.zone, now=now) if end_expr else None
+    if start and end:
+        start_date, end_date = start.date(), end.date()
+    elif start:
+        start_date = start.date()
+        end_date = start.date()
     else:
-        await message.reply_text(format_weekly_report(user["id"], today))
+        start_date, end_date = week_bounds(now.date())
+
+    if metric == "sales_calls":
+        rows = repo.get_sales_calls(user["id"], start_date.isoformat(), end_date.isoformat())
+        await message.reply_text(f"Sales calls: {len(rows)} ({start_date} to {end_date})")
+    elif metric == "content":
+        rows = repo.get_content(user["id"], start_date.isoformat(), end_date.isoformat())
+        await message.reply_text(f"Content entries: {len(rows)} ({start_date} to {end_date})")
+    elif metric == "meetings":
+        rows = repo.get_meetings_in_range(
+            user["id"],
+            dt.datetime.combine(start_date, dt.time.min, tzinfo=tz).isoformat(),
+            dt.datetime.combine(end_date, dt.time.max, tzinfo=tz).isoformat(),
+        )
+        await message.reply_text(f"Meetings: {len(rows)} ({start_date} to {end_date})")
+    elif metric == "objections":
+        rows = objections_list(user["id"], start_date, end_date)
+        if not rows:
+            await message.reply_text("No objections logged in that period.")
+        else:
+            await message.reply_text("Objections:\n" + "\n".join(f"• {r.get('objection') or 'Unknown'}" for r in rows))
+    else:
+        data = daily_summary_data(user["id"], now.date())
+        await message.reply_text(_format_daily(data, now.date()))
+
+
+async def _handle_general_question(message, user, parsed):
+    question = parsed.get("query", {}).get("text") or parsed.get("notes") or ""
+    answer = answer_objection_question(question)
+    await message.reply_text(answer)
