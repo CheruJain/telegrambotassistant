@@ -38,7 +38,11 @@ Return this exact JSON shape (omit fields you have no info for, use null):
     "follow_ups": <int or null>,
     "wins": <int or null>,
     "lead_name": "<string or null>",
-    "outcome": "Interested|Not Interested|Follow Up|Proposal|Won|Lost|No Answer|Rescheduled|null",
+    "phone_number": "<string or null>",
+    "booked_date": "<verbatim booked date phrase or null>",
+    "booked_time": "<verbatim booked time phrase or null>",
+    "call_type": "Discovery|Follow Up|Demo|Closing|Other|null",
+    "outcome": "Interested|Not Interested|Follow Up|Proposal|Won|Lost|No Answer|Rescheduled|Booked|null",
     "source": "LinkedIn|Instagram Account 1|Instagram Account 2|Referral|Other|null",
     "objection": "<string or null>",
     "deal_value": <number or null>
@@ -74,6 +78,9 @@ Rules:
 - If the message is ambiguous about date/time, still extract the raw phrase in date_expression;
   do not guess an exact date/time yourself, that is handled by other code.
 - Quantity defaults to 1 if the user implies a single post but doesn't state a number.
+- If a sales call is booked with a specific person, extract lead_name, phone_number, call_type, booked_date, and booked_time when present.
+- Only extract phone_number when the user provides it. Never invent or infer a phone number.
+- For normal sales-call activity without a booked call, leave phone_number, booked_date, booked_time, and call_type as null.
 - Keep "notes" short (<200 chars) or null.
 """
 
