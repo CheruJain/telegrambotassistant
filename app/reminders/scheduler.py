@@ -6,9 +6,7 @@ Runs entirely inside this process using APScheduler:
      for anything due and sends it via Telegram.
   2. Every day at 6 AM, sends today's newly-added-after-9-PM tasks/entries.
   3. Every day at 9 PM, sends today's activity summary plus tomorrow's tasks.
-  4. A daily 6 PM job sends the next day's booked sales calls as one
-     consolidated confirmation list.
-  5. A weekly cron job generates and sends the automatic weekly report.
+  4. A weekly cron job generates and sends the automatic weekly report.
 
 This keeps running as long as the process is alive, independent of whether
 the user is actively chatting.
@@ -64,14 +62,6 @@ class ReminderScheduler:
             replace_existing=True,
         )
 
-        # Every day at 6 PM, send one consolidated list of tomorrow's booked calls.
-        self.scheduler.add_job(
-            self._send_tomorrow_booked_calls,
-            CronTrigger(hour=18, minute=0, timezone=self.tz),
-            id="tomorrow_booked_calls",
-            replace_existing=True,
-        )
-
         day_map = {"mon": "mon", "tue": "tue", "wed": "wed", "thu": "thu",
                    "fri": "fri", "sat": "sat", "sun": "sun"}
         day = day_map.get(settings.WEEKLY_REPORT_DAY.lower(), "sun")
@@ -88,9 +78,8 @@ class ReminderScheduler:
         )
         self.scheduler.start()
         logger.info(
-            "Scheduler started: polling every %ss, morning digest 06:00 %s, evening digest 21:00 %s, tomorrow booked calls 18:00 %s, weekly report on %s %02d:%02d %s",
+            "Scheduler started: polling every %ss, morning digest 06:00 %s, evening digest 21:00 %s, weekly report on %s %02d:%02d %s",
             settings.SCHEDULER_POLL_SECONDS,
-            self.tz,
             self.tz,
             self.tz,
             day,
@@ -310,36 +299,6 @@ class ReminderScheduler:
             logger.error("Failed to send evening digest: %s", e)
         except Exception as e:
             logger.error("Error generating evening digest: %s", e)
-
-    async def _send_tomorrow_booked_calls(self):
-        try:
-            tomorrow = dt.datetime.now(self.tz).date() + dt.timedelta(days=1)
-            booked = repo.get_booked_sales_calls_for_date(
-                self.user_id, tomorrow.isoformat()
-            )
-
-            if not booked:
-                return
-
-            lines = [f"Tomorrow's booked calls — {tomorrow.strftime('%A, %d %b')}", ""]
-            for index, call in enumerate(booked, 1):
-                name = call.get("lead_name") or "Unknown"
-                phone = call.get("phone_number") or "Number not provided"
-                call_type = call.get("call_type") or "Sales call"
-                time_value = call.get("booked_time")
-                time_label = self._format_time(time_value)
-                lines.extend([
-                    f"{index}. {name}",
-                    f"   {phone}",
-                    f"   {call_type} — {time_label}",
-                    "",
-                ])
-
-            await self.bot.send_message(chat_id=self.chat_id, text="\n".join(lines).rstrip())
-        except TelegramError as e:
-            logger.error("Failed to send tomorrow's booked calls: %s", e)
-        except Exception as e:
-            logger.error("Error generating tomorrow's booked calls: %s", e)
 
     async def _send_weekly_report(self):
         try:
