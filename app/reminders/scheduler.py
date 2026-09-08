@@ -5,11 +5,9 @@ Runs entirely inside this process using APScheduler:
   1. A polling job every SCHEDULER_POLL_SECONDS checks the `reminders` table
      for anything due and sends it via Telegram.
   2. Every day at 6 AM, sends today's newly-added-after-9-PM tasks/entries.
-  3. Every day at 9 PM, sends today's activity summary plus tomorrow's tasks.
+  3. Every day at 9 PM, sends today's activity summary plus tomorrow's tasks
+     and upcoming meetings with saved phone numbers.
   4. A weekly cron job generates and sends the automatic weekly report.
-
-This keeps running as long as the process is alive, independent of whether
-the user is actively chatting.
 """
 from __future__ import annotations
 
@@ -47,14 +45,12 @@ class ReminderScheduler:
             id="reminder_poll",
             replace_existing=True,
         )
-
         self.scheduler.add_job(
             self._send_morning_digest,
             CronTrigger(hour=6, minute=0, timezone=self.tz),
             id="morning_digest",
             replace_existing=True,
         )
-
         self.scheduler.add_job(
             self._send_evening_digest,
             CronTrigger(hour=21, minute=0, timezone=self.tz),
@@ -136,9 +132,9 @@ class ReminderScheduler:
         return lines
 
     def _build_digest_text(self, target_date: dt.date, data: dict, heading: str) -> str:
-        lines = [heading, f"Date: {target_date.strftime('%A, %d %b %Y')}", ""]
+        lines = [heading, f"Date: {target_date.strftime('%d-%b-%Y')}", ""]
 
-        activity = data.get("activity", [])
+        activity = data.get("activity") or data.get("work") or []
         if activity:
             lines.append("Work / Activity:")
             for row in activity:
@@ -188,12 +184,17 @@ class ReminderScheduler:
                 start = row.get("start_time")
                 try:
                     start_dt = dt.datetime.fromisoformat(str(start))
+                    if start_dt.tzinfo is None:
+                        start_dt = self.tz.localize(start_dt)
+                    else:
+                        start_dt = start_dt.astimezone(self.tz)
                     time_label = start_dt.strftime("%I:%M %p").lstrip("0")
                 except (TypeError, ValueError):
                     time_label = "Time not provided"
                 detail = f"{time_label} — {row.get('title') or 'Meeting'}"
-                if row.get("person"):
-                    detail += f" — {row['person']}"
+                person = row.get("person")
+                if person and person.lower() not in detail.lower():
+                    detail += f" — {person}"
                 lines.append(f"  • {detail}")
             lines.append("")
 
@@ -218,6 +219,37 @@ class ReminderScheduler:
 
         return "\n".join(lines).rstrip()
 
+    def _build_upcoming_meetings(self, target_date: dt.date, meetings: list[dict]) -> list[str]:
+        if not meetings:
+            return ["Upcoming meetings", "  None"]
+
+        booked_calls = repo.get_booked_sales_calls_for_date(self.user_id, target_date.isoformat())
+        lines = ["Upcoming meetings"]
+        for row in meetings:
+            start = row.get("start_time")
+            try:
+                start_dt = dt.datetime.fromisoformat(str(start))
+                if start_dt.tzinfo is None:
+                    start_dt = self.tz.localize(start_dt)
+                else:
+                    start_dt = start_dt.astimezone(self.tz)
+                time_label = start_dt.strftime("%I:%M %p").lstrip("0")
+            except (TypeError, ValueError):
+                time_label = "Time not provided"
+
+            person = row.get("person") or "Meeting"
+            phone = None
+            for call in booked_calls:
+                if (call.get("lead_name") or "").strip().lower() == person.strip().lower():
+                    phone = call.get("phone_number")
+                    break
+
+            detail = f"{time_label} — {person}"
+            if phone:
+                detail += f" — {phone}"
+            lines.append(f"  • {detail}")
+        return lines
+
     async def _send_morning_digest(self):
         try:
             today = dt.datetime.now(self.tz).date()
@@ -231,9 +263,6 @@ class ReminderScheduler:
                 created_after=cutoff,
             )
 
-            # The 6 AM digest is intentionally silent when nothing new was
-            # added after 9 PM yesterday. Do not send a "No entries found"
-            # message in that case.
             has_new_entries = any(
                 data.get(key)
                 for key in ("activity", "content", "sales", "meetings", "tasks")
@@ -247,11 +276,7 @@ class ReminderScheduler:
 
             await self.bot.send_message(
                 chat_id=self.chat_id,
-                text=self._build_digest_text(
-                    today,
-                    data,
-                    "Morning task summary",
-                ),
+                text=self._build_digest_text(today, data, "Morning task summary"),
             )
         except TelegramError as e:
             logger.error("Failed to send morning digest: %s", e)
@@ -265,15 +290,11 @@ class ReminderScheduler:
             today_data = repo.get_daily_digest_data(self.user_id, today.isoformat())
             tomorrow_data = repo.get_daily_digest_data(self.user_id, tomorrow.isoformat())
 
-            today_text = self._build_digest_text(
-                today,
-                today_data,
-                "Today's summary",
-            )
+            today_text = self._build_digest_text(today, today_data, "Today's summary")
             tomorrow_tasks = tomorrow_data.get("tasks", [])
             tomorrow_lines = [
                 "Tomorrow's tasks",
-                f"Date: {tomorrow.strftime('%A, %d %b %Y')}",
+                f"Date: {tomorrow.strftime('%d-%b-%Y')}",
                 "",
             ]
             if tomorrow_tasks:
@@ -291,9 +312,11 @@ class ReminderScheduler:
             else:
                 tomorrow_lines.append("  None")
 
+            upcoming_meetings = self._build_upcoming_meetings(tomorrow, tomorrow_data.get("meetings", []))
+
             await self.bot.send_message(
                 chat_id=self.chat_id,
-                text=today_text + "\n\n" + "\n".join(tomorrow_lines),
+                text=today_text + "\n\n" + "\n".join(upcoming_meetings) + "\n\n" + "\n".join(tomorrow_lines),
             )
         except TelegramError as e:
             logger.error("Failed to send evening digest: %s", e)
