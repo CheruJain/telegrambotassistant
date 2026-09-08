@@ -109,17 +109,13 @@ class ReminderScheduler:
     async def _send_tomorrow_booked_calls(self):
         try:
             tomorrow = dt.datetime.now(self.tz).date() + dt.timedelta(days=1)
-            calls = repo.get_sales_calls(
-                self.user_id,
-                tomorrow.isoformat(),
-                tomorrow.isoformat(),
+            booked = repo.get_booked_sales_calls_for_date(
+                self.user_id, tomorrow.isoformat()
             )
-            booked = [c for c in calls if (c.get("outcome") or "").lower() == "booked"]
 
             if not booked:
                 return
 
-            booked.sort(key=lambda c: c.get("booked_time") or "23:59:59")
             lines = [f"Tomorrow's booked calls — {tomorrow.strftime('%A, %d %b')}", ""]
             for index, call in enumerate(booked, 1):
                 name = call.get("lead_name") or "Unknown"
