@@ -117,7 +117,7 @@ async def _dispatch(update, context, user: dict, tz, parsed: dict, raw_text: str
     elif intent == "update_reminder":
         await _handle_update_reminder(message, user, tz, parsed)
     elif intent == "cancel_reminder":
-        await _handle_cancel_reminder(message, user, parsed)
+        await _handle_cancel_reminder(message, user, tz, parsed)
     elif intent == "daily_summary":
         today = dt.datetime.now(tz).date()
         data = daily_summary_data(user["id"], today)
@@ -144,7 +144,7 @@ async def _dispatch(update, context, user: dict, tz, parsed: dict, raw_text: str
 async def _handle_log_work(message, user, tz, parsed, raw_text):
     today = dt.datetime.now(tz).date().isoformat()
     repo.log_activity(user["id"], today, "Other", "work_done", quantity=1, notes=raw_text[:200])
-    await message.reply_text("Noted - logged today's work. 👍")
+    await message.reply_text("Noted - logged today's work.")
 
 
 async def _handle_log_content(message, user, tz, parsed):
@@ -173,7 +173,6 @@ async def _handle_log_sales(message, user, tz, parsed):
     sales = parsed.get("sales") or {}
     today = dt.datetime.now(tz).date().isoformat()
 
-    # Case 1: a specific named lead with an outcome -> detailed row.
     if sales.get("lead_name"):
         follow_up_date = None
         date_expr = parsed.get("date_expression")
@@ -181,6 +180,13 @@ async def _handle_log_sales(message, user, tz, parsed):
             resolved = resolve_datetime(date_expr, tz.zone)
             if resolved:
                 follow_up_date = resolved.date().isoformat()
+
+        booked_date = None
+        if sales.get("booked_date"):
+            resolved_booked = resolve_datetime(sales.get("booked_date"), tz.zone)
+            if resolved_booked:
+                booked_date = resolved_booked.date().isoformat()
+
         repo.log_sales_call(
             user_id=user["id"],
             date=today,
@@ -190,13 +196,17 @@ async def _handle_log_sales(message, user, tz, parsed):
             objection=sales.get("objection"),
             follow_up_date=follow_up_date,
             deal_value=sales.get("deal_value"),
+            phone_number=sales.get("phone_number"),
+            booked_date=booked_date,
+            booked_time=sales.get("booked_time"),
+            call_type=sales.get("call_type"),
+            confirmation_reminder_sent=False,
         )
         await message.reply_text(
             f"Added: sales call with {sales['lead_name']} — {sales.get('outcome') or 'logged'}."
         )
         return
 
-    # Case 2: aggregate counts, e.g. "42 calls, 7 interested, 3 follow-up".
     parts = []
     if sales.get("total_calls"):
         repo.log_activity(user["id"], today, "Sales", "calls", quantity=sales["total_calls"])
@@ -232,26 +242,56 @@ async def _handle_create_meeting(message, user, tz, parsed):
         )
         return
 
+    meeting_type = meeting.get("meeting_type") or "other"
+    is_sales_call = meeting_type == "sales_call" and bool(meeting.get("person"))
+
     title = meeting.get("title") or (
+        f"Sales call with {meeting['person']}" if is_sales_call else
         f"Meeting with {meeting['person']}" if meeting.get("person") else "Meeting"
     )
+
     created = repo.create_meeting(
         user_id=user["id"],
         title=title,
         start_time_iso=start.isoformat(),
         person=meeting.get("person"),
-        meeting_type=meeting.get("meeting_type") or "other",
+        meeting_type=meeting_type,
     )
 
-    reminder_field = parsed.get("reminder") or {}
-    offset_minutes = reminder_field.get("offset_before_meeting_minutes") or \
-        settings.DEFAULT_MEETING_REMINDER_MINUTES
-    reminder_time = start - dt.timedelta(minutes=offset_minutes)
+    now = dt.datetime.now(tz)
+    if is_sales_call:
+        repo.log_sales_call(
+            user_id=user["id"],
+            date=now.date().isoformat(),
+            lead_name=meeting.get("person"),
+            outcome="Booked",
+            phone_number=meeting.get("phone_number"),
+            booked_date=start.date().isoformat(),
+            booked_time=start.strftime("%H:%M:%S"),
+            call_type=meeting.get("call_type"),
+            confirmation_reminder_sent=False,
+            notes="Booked sales call via Telegram",
+        )
 
-    if reminder_time > dt.datetime.now(tz):
+        offset_minutes = 60
+        reminder_time = start - dt.timedelta(minutes=offset_minutes)
+        reminder_text = (
+            f"Confirm attendance: {meeting['person']} — sales call at "
+            f"{start.strftime('%I:%M %p').lstrip('0')}"
+        )
+        reminder_prefix = "Confirmation reminder"
+    else:
+        reminder_field = parsed.get("reminder") or {}
+        offset_minutes = reminder_field.get("offset_before_meeting_minutes") or \
+            settings.DEFAULT_MEETING_REMINDER_MINUTES
+        reminder_time = start - dt.timedelta(minutes=offset_minutes)
+        reminder_text = f"{title} in {offset_minutes} minutes"
+        reminder_prefix = "Reminder"
+
+    if reminder_time > now:
         repo.create_reminder(
             user_id=user["id"],
-            reminder_text=f"{title} in {offset_minutes} minutes",
+            reminder_text=reminder_text,
             trigger_time_iso=reminder_time.isoformat(),
             related_meeting_id=created["id"],
         )
@@ -260,7 +300,7 @@ async def _handle_create_meeting(message, user, tz, parsed):
     time_label = start.strftime("%I:%M %p").lstrip("0")
     reminder_label = reminder_time.strftime("%I:%M %p").lstrip("0")
     await message.reply_text(
-        f"Added:\n{day_label}, {time_label}\n{title}\n\nReminder: {reminder_label}"
+        f"Added:\n{day_label}, {time_label}\n{title}\n\n{reminder_prefix}: {reminder_label}"
     )
 
 
@@ -398,7 +438,7 @@ async def _handle_update_reminder(message, user, tz, parsed):
     await message.reply_text(f"Updated reminder to {label}.")
 
 
-async def _handle_cancel_reminder(message, user, parsed):
+async def _handle_cancel_reminder(message, user, tz, parsed):
     reminder_info = parsed.get("reminder") or {}
     search_text = reminder_info.get("search_text") or reminder_info.get("text")
     pending = repo.get_pending_reminders(user["id"])
@@ -416,9 +456,9 @@ async def _handle_cancel_reminder(message, user, parsed):
 async def _handle_pending_followups(message, user):
     followups = repo.get_pending_followups(user["id"])
     if not followups:
-        await message.reply_text("No pending follow-ups. 🎉")
+        await message.reply_text("No pending follow-ups.")
         return
-    lines = ["📋 PENDING FOLLOW-UPS", ""]
+    lines = ["PENDING FOLLOW-UPS", ""]
     for f in followups:
         lines.append(
             f"  • {f.get('lead_name') or 'Unknown lead'} — follow-up {f.get('follow_up_date') or '?'} "
@@ -434,7 +474,6 @@ async def _handle_query_stats(message, user, tz, parsed, raw_text):
 
     if topic == "objections":
         start, end = week_bounds(today)
-        # look back over a bigger window for objection questions - 30 days
         objections = objections_list(user["id"], today - dt.timedelta(days=30), today)
         if not objections:
             await message.reply_text("Not enough data yet to identify objection patterns.")
