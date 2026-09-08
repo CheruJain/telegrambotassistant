@@ -248,6 +248,20 @@ def get_sales_calls(user_id: str, start_date: str, end_date: str) -> list[dict]:
     return res.data
 
 
+def get_booked_sales_calls_for_date(user_id: str, booked_date: str) -> list[dict]:
+    db = get_client()
+    res = (
+        db.table("sales_calls")
+        .select("*")
+        .eq("user_id", user_id)
+        .eq("booked_date", booked_date)
+        .eq("outcome", "Booked")
+        .order("booked_time")
+        .execute()
+    )
+    return res.data
+
+
 def get_pending_followups(user_id: str, as_of_date: str | None = None) -> list[dict]:
     db = get_client()
     q = (
