@@ -183,6 +183,82 @@ def find_pending_reminder(user_id: str, search_text: str) -> list[dict]:
     return [r for r in res.data if text in (r.get("reminder_text") or "").lower()]
 
 
+def ensure_booking_confirmation_reminders(user_id: str, now: dt.datetime | None = None) -> int:
+    """Repair missing one-hour confirmation reminders for every future booked sales call."""
+    db = get_client()
+    ist = dt.timezone(dt.timedelta(hours=5, minutes=30))
+    now = (now or dt.datetime.now(ist)).astimezone(ist)
+    rows = db.table("sales_calls").select("*").eq("user_id", user_id).eq("outcome", "Booked").execute().data or []
+    created_count = 0
+
+    for call in rows:
+        if not call.get("lead_name") or not call.get("booked_date") or not call.get("booked_time"):
+            continue
+        try:
+            call_start = dt.datetime.combine(
+                dt.date.fromisoformat(str(call["booked_date"])),
+                dt.time.fromisoformat(str(call["booked_time"])[:8]),
+                tzinfo=ist,
+            )
+        except ValueError:
+            continue
+        if call_start <= now:
+            continue
+
+        reminder_time = call_start - dt.timedelta(minutes=60)
+        if reminder_time <= now:
+            continue
+
+        meetings = db.table("meetings").select("id,start_time,person,status").eq("user_id", user_id).eq("status", "scheduled").execute().data or []
+        meeting_id = None
+        for meeting in meetings:
+            if (meeting.get("person") or "").strip().lower() != str(call["lead_name"]).strip().lower():
+                continue
+            try:
+                meeting_start = dt.datetime.fromisoformat(str(meeting["start_time"]).replace("Z", "+00:00"))
+                if meeting_start.tzinfo is None:
+                    meeting_start = meeting_start.replace(tzinfo=dt.timezone.utc)
+                meeting_start = meeting_start.astimezone(ist)
+            except ValueError:
+                continue
+            if meeting_start == call_start:
+                meeting_id = meeting["id"]
+                break
+
+        pending_query = db.table("reminders").select("id,trigger_time,related_meeting_id,reminder_text").eq("user_id", user_id).eq("status", "pending")
+        pending = pending_query.execute().data or []
+        exists = False
+        for reminder in pending:
+            if meeting_id and reminder.get("related_meeting_id") == meeting_id:
+                exists = True
+                break
+            try:
+                trigger = dt.datetime.fromisoformat(str(reminder["trigger_time"]).replace("Z", "+00:00"))
+                if trigger.tzinfo is None:
+                    trigger = trigger.replace(tzinfo=dt.timezone.utc)
+                trigger = trigger.astimezone(ist)
+            except ValueError:
+                continue
+            if abs((trigger - reminder_time).total_seconds()) <= 60 and str(call["lead_name"]).lower() in str(reminder.get("reminder_text") or "").lower():
+                exists = True
+                break
+
+        if exists:
+            continue
+
+        reminder_text = f"Confirm attendance: {call['lead_name']} — sales call at {call_start.strftime('%I:%M %p').lstrip('0')}"
+        if call.get("phone_number"):
+            reminder_text += f"\nPhone: {call['phone_number']}"
+        create_reminder(user_id, reminder_text, reminder_time.isoformat(), related_meeting_id=meeting_id)
+        created_count += 1
+
+    return created_count
+
+
+def get_pending_reminders(user_id: str) -> list[dict]:
+    return get_client().table("reminders").select("*").eq("user_id", user_id).eq("status", "pending").order("trigger_time").execute().data
+
+
 def reschedule_recurring(reminder: dict, next_trigger_iso: str) -> dict:
     payload = {"user_id": reminder["user_id"], "reminder_text": reminder["reminder_text"], "trigger_time": next_trigger_iso, "related_meeting_id": reminder.get("related_meeting_id"), "recurrence": reminder.get("recurrence"), "status": "pending"}
     res = get_client().table("reminders").insert(payload).execute()
