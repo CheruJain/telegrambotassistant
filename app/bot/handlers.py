@@ -1,4 +1,4 @@
-"""Natural-language Telegram message handlers."""
+"""Stable natural-language Telegram message handlers."""
 from __future__ import annotations
 
 import datetime as dt
@@ -38,22 +38,19 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     text = (message.text or "").strip()
     if not text:
         return
-
     user, tz = _get_user_and_tz(update)
     try:
         if repo.already_processed(user["id"], message.chat_id, message.message_id):
             return
     except Exception as exc:
         logger.warning("Duplicate check failed: %s", exc)
-
     try:
         parsed = parse_message(text)
-        await _dispatch(update, context, user, tz, parsed, text)
+        await _dispatch(message, user, tz, parsed, text)
     except Exception as exc:
         logger.exception("Message handling failed: %s", exc)
         await message.reply_text("Something went wrong while saving that. Nothing was recorded - please try again.")
         return
-
     try:
         repo.mark_processed(user["id"], message.chat_id, message.message_id)
     except Exception:
@@ -66,36 +63,44 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.message.reply_text("Voice transcription isn't wired up in this deployment yet - please type your message for now.")
 
 
-async def _dispatch(update, context, user, tz, parsed, raw_text):
+async def _dispatch(message, user, tz, parsed, raw_text):
     intent = parsed.get("intent", "general_question")
-    message = update.message
-    handlers = {
-        "log_work": lambda: _handle_log_work(message, user, tz, raw_text),
-        "log_content": lambda: _handle_log_content(message, user, tz, parsed),
-        "log_sales": lambda: _handle_log_sales(message, user, tz, parsed, raw_text),
-        "create_meeting": lambda: _handle_create_meeting(message, user, tz, parsed),
-        "update_meeting": lambda: _handle_update_meeting(message, user, tz, parsed),
-        "cancel_meeting": lambda: _handle_cancel_meeting(message, user, parsed),
-        "create_reminder": lambda: _handle_create_reminder(message, user, tz, parsed),
-        "update_reminder": lambda: _handle_update_reminder(message, user, tz, parsed),
-        "cancel_reminder": lambda: _handle_cancel_reminder(message, user, parsed),
-        "pending_followups": lambda: _handle_pending_followups(message, user),
-        "upcoming_meetings": lambda: _handle_upcoming_meetings(message, user, tz, parsed),
-        "query_stats": lambda: _handle_query_stats(message, user, tz, parsed),
-        "daily_summary": lambda: _handle_daily_summary(message, user, tz),
-        "weekly_summary": lambda: _handle_weekly_summary(message, user, tz),
-        "general_question": lambda: _handle_general_question(message, user, tz, parsed),
-    }
-    handler = handlers.get(intent)
-    if handler:
-        await handler()
+    if intent == "log_work":
+        await _handle_log_work(message, user, tz, raw_text)
+    elif intent == "log_content":
+        await _handle_log_content(message, user, tz, parsed)
+    elif intent == "log_sales":
+        await _handle_log_sales(message, user, tz, parsed, raw_text)
+    elif intent == "create_meeting":
+        await _handle_create_meeting(message, user, tz, parsed)
+    elif intent == "update_meeting":
+        await _handle_update_meeting(message, user, tz, parsed)
+    elif intent == "cancel_meeting":
+        await _handle_cancel_meeting(message, user, parsed)
+    elif intent == "create_reminder":
+        await _handle_create_reminder(message, user, tz, parsed)
+    elif intent == "update_reminder":
+        await _handle_update_reminder(message, user, tz, parsed)
+    elif intent == "cancel_reminder":
+        await _handle_cancel_reminder(message, user, parsed)
+    elif intent == "pending_followups":
+        await _handle_pending_followups(message, user)
+    elif intent == "upcoming_meetings":
+        await _handle_upcoming_meetings(message, user, tz, parsed)
+    elif intent == "query_stats":
+        await _handle_query_stats(message, user, tz, parsed)
+    elif intent == "daily_summary":
+        today = dt.datetime.now(tz).date()
+        await message.reply_text(_format_daily(daily_summary_data(user["id"], today), today))
+    elif intent == "weekly_summary":
+        await message.reply_text("Crunching this week's numbers…")
+        await message.reply_text(format_weekly_report(user["id"], dt.datetime.now(tz).date()))
     else:
-        await _handle_general_question(message, user, tz, parsed)
+        await _handle_general_question(message, parsed)
 
 
 async def _handle_log_work(message, user, tz, raw_text):
-    today = dt.datetime.now(tz).date().isoformat()
-    repo.log_activity(user["id"], today, "Other", "work_done", quantity=1, notes=raw_text[:200])
+    repo.log_activity(user["id"], dt.datetime.now(tz).date().isoformat(), "Other", "work_done", quantity=1, notes=raw_text[:200])
     await message.reply_text("Noted - logged today's work.")
 
 
@@ -133,13 +138,11 @@ async def _handle_log_sales(message, user, tz, parsed, raw_text):
         repo.log_sales_call(user["id"], today, lead_name=sales.get("lead_name"), source=sales.get("source"), outcome=sales.get("outcome"), objection=sales.get("objection"), follow_up_date=follow_up_date, deal_value=sales.get("deal_value"), phone_number=sales.get("phone_number"), booked_date=booked_date, booked_time=sales.get("booked_time"), call_type=sales.get("call_type"))
         await message.reply_text(f"Added: sales call with {sales['lead_name']} — {sales.get('outcome') or 'logged'}.")
         return
-
     parts = []
     for key, label, activity in (("total_calls", "sales calls", "calls"), ("interested", "interested", "interested"), ("follow_ups", "follow-ups", "follow_ups"), ("wins", "won", "wins")):
         value = sales.get(key)
         if value:
-            notes = raw_text[:200] if key == "follow_ups" else None
-            repo.log_activity(user["id"], today, "Sales", activity, quantity=int(value), notes=notes)
+            repo.log_activity(user["id"], today, "Sales", activity, quantity=int(value), notes=raw_text[:200] if key == "follow_ups" else None)
             parts.append(f"{value} {label}")
     if not parts:
         await message.reply_text("I couldn't find any numbers in that - could you rephrase?")
@@ -156,11 +159,11 @@ async def _handle_create_meeting(message, user, tz, parsed):
     meeting_type = meeting.get("meeting_type") or "other"
     is_sales_call = meeting_type == "sales_call" and bool(meeting.get("person"))
     person = meeting.get("person")
+    phone = meeting.get("phone_number")
     title = meeting.get("title") or (f"Sales call with {person}" if is_sales_call else f"Meeting with {person}" if person else "Meeting")
     created = repo.create_meeting(user["id"], title, start.isoformat(), person=person, meeting_type=meeting_type)
     now = dt.datetime.now(tz)
     if is_sales_call:
-        phone = meeting.get("phone_number")
         repo.log_sales_call(user["id"], now.date().isoformat(), lead_name=person, outcome="Booked", phone_number=phone, booked_date=start.date().isoformat(), booked_time=start.strftime("%H:%M:%S"), call_type=meeting.get("call_type"), notes="Booked sales call via Telegram")
         reminder_time = start - dt.timedelta(minutes=60)
         reminder_text = f"Confirm attendance: {person} — sales call at {start.strftime('%I:%M %p').lstrip('0')}"
@@ -168,17 +171,17 @@ async def _handle_create_meeting(message, user, tz, parsed):
             reminder_text += f"\nPhone: {phone}"
         reminder_prefix = "Confirmation reminder"
     else:
-        reminder_field = parsed.get("reminder") or {}
-        offset = int(reminder_field.get("offset_before_meeting_minutes") or settings.DEFAULT_MEETING_REMINDER_MINUTES)
+        offset = int((parsed.get("reminder") or {}).get("offset_before_meeting_minutes") or settings.DEFAULT_MEETING_REMINDER_MINUTES)
         reminder_time = start - dt.timedelta(minutes=offset)
         reminder_text = f"{title} in {offset} minutes"
         reminder_prefix = "Reminder"
     if reminder_time > now:
         repo.create_reminder(user["id"], reminder_text, reminder_time.isoformat(), related_meeting_id=created["id"])
-    await message.reply_text(f"Added:\n{start.strftime('%A, %d %b')}\n{start.strftime('%I:%M %p').lstrip('0')} — {title}{f'\nPhone: {meeting.get("phone_number")}' if is_sales_call and meeting.get("phone_number") else ''}\n\n{reminder_prefix}: {reminder_time.strftime('%I:%M %p').lstrip('0')}")
+    phone_line = f"\nPhone: {phone}" if is_sales_call and phone else ""
+    await message.reply_text(f"Added:\n{start.strftime('%A, %d %b')}\n{start.strftime('%I:%M %p').lstrip('0')} — {title}{phone_line}\n\n{reminder_prefix}: {reminder_time.strftime('%I:%M %p').lstrip('0')}")
 
 
-async def _meeting_matches_or_ask(message, matches):
+async def _meeting_target(message, matches):
     if not matches:
         await message.reply_text("I couldn't find an upcoming meeting matching that.")
         return None
@@ -186,8 +189,7 @@ async def _meeting_matches_or_ask(message, matches):
         return matches[0]
     lines = [f"I found {len(matches)} matching meetings. Please be more specific:"]
     for row in matches[:5]:
-        start = str(row.get("start_time") or "")[:16].replace("T", " ")
-        lines.append(f"• {start} — {row.get('title') or 'Meeting'}")
+        lines.append(f"• {str(row.get('start_time') or '')[:16].replace('T', ' ')} — {row.get('title') or 'Meeting'}")
     await message.reply_text("\n".join(lines))
     return None
 
@@ -198,7 +200,7 @@ async def _handle_update_meeting(message, user, tz, parsed):
     if not search:
         await message.reply_text("Which meeting should I update? Please mention the person or title.")
         return
-    target = await _meeting_matches_or_ask(message, repo.find_meeting_by_person_or_title(user["id"], search))
+    target = await _meeting_target(message, repo.find_meeting_by_person_or_title(user["id"], search))
     if not target:
         return
     new_start = resolve_datetime(meeting.get("new_time_expression") or parsed.get("date_expression"), tz.zone, now=dt.datetime.now(tz))
@@ -219,7 +221,7 @@ async def _handle_cancel_meeting(message, user, parsed):
     if not search:
         await message.reply_text("Which meeting should I cancel? Please mention the person or title.")
         return
-    target = await _meeting_matches_or_ask(message, repo.find_meeting_by_person_or_title(user["id"], search))
+    target = await _meeting_target(message, repo.find_meeting_by_person_or_title(user["id"], search))
     if not target:
         return
     repo.cancel_meeting(target["id"])
@@ -235,12 +237,12 @@ async def _handle_upcoming_meetings(message, user, tz, parsed):
         end = dt.datetime.combine(target.date(), dt.time.max, tzinfo=tz)
     else:
         start, end = now, now + dt.timedelta(days=7)
-    meetings = repo.get_meetings_in_range(user["id"], start.isoformat(), end.isoformat())
-    if not meetings:
+    rows = repo.get_meetings_in_range(user["id"], start.isoformat(), end.isoformat())
+    if not rows:
         await message.reply_text("No meetings found in that range.")
         return
     lines = []
-    for row in meetings:
+    for row in rows:
         value = dt.datetime.fromisoformat(row["start_time"])
         if value.tzinfo is None:
             value = pytz.utc.localize(value)
@@ -262,10 +264,7 @@ async def _handle_create_reminder(message, user, tz, parsed):
 async def _handle_update_reminder(message, user, tz, parsed):
     reminder = parsed.get("reminder") or {}
     search = reminder.get("search_text") or reminder.get("text")
-    if not search:
-        await message.reply_text("Which reminder should I update? Please mention its text.")
-        return
-    matches = repo.find_pending_reminder(user["id"], search)
+    matches = repo.find_pending_reminder(user["id"], search) if search else []
     if not matches:
         await message.reply_text(f"I couldn't find a pending reminder matching '{search}'.")
         return
@@ -283,10 +282,7 @@ async def _handle_update_reminder(message, user, tz, parsed):
 async def _handle_cancel_reminder(message, user, parsed):
     reminder = parsed.get("reminder") or {}
     search = reminder.get("search_text") or reminder.get("text")
-    if not search:
-        await message.reply_text("Which reminder should I cancel? Please mention its text.")
-        return
-    matches = repo.find_pending_reminder(user["id"], search)
+    matches = repo.find_pending_reminder(user["id"], search) if search else []
     if not matches:
         await message.reply_text(f"I couldn't find a pending reminder matching '{search}'.")
         return
@@ -311,18 +307,16 @@ async def _handle_query_stats(message, user, tz, parsed):
     now = dt.datetime.now(tz)
     start = resolve_datetime(query.get("start_date"), tz.zone, now=now) if query.get("start_date") else None
     end = resolve_datetime(query.get("end_date"), tz.zone, now=now) if query.get("end_date") else None
-    period = query.get("period")
     if start and end:
         start_date, end_date = start.date(), end.date()
     elif start:
         start_date, end_date = start.date(), now.date()
-    elif period == "today":
+    elif query.get("period") == "today":
         start_date = end_date = now.date()
-    elif period == "yesterday":
+    elif query.get("period") == "yesterday":
         start_date = end_date = now.date() - dt.timedelta(days=1)
     else:
         start_date, end_date = week_bounds(now.date())
-
     if metric == "sales_calls":
         rows = repo.get_sales_calls(user["id"], start_date.isoformat(), end_date.isoformat())
         await message.reply_text(f"Sales calls: {len(rows)} ({start_date} to {end_date})")
@@ -334,31 +328,14 @@ async def _handle_query_stats(message, user, tz, parsed):
         await message.reply_text(f"Meetings: {len(rows)} ({start_date} to {end_date})")
     elif metric == "objections":
         rows = objections_list(user["id"], start_date, end_date)
-        if not rows:
-            await message.reply_text("No objections logged in that period.")
-        else:
-            question = query.get("text") or "What objection patterns do you see?"
-            objections = [r.get("objection") or "Unknown" for r in rows]
-            await message.reply_text(await _answer_objection(question, objections))
+        objections = [r.get("objection") or "Unknown" for r in rows]
+        await message.reply_text(answer_objection_question(query.get("text") or "What objection patterns do you see?", objections))
     else:
-        await _handle_daily_summary(message, user, tz)
+        today = now.date()
+        await message.reply_text(_format_daily(daily_summary_data(user["id"], today), today))
 
 
-async def _answer_objection(question, objections):
-    return answer_objection_question(question, objections)
-
-
-async def _handle_daily_summary(message, user, tz):
-    today = dt.datetime.now(tz).date()
-    await message.reply_text(_format_daily(daily_summary_data(user["id"], today), today))
-
-
-async def _handle_weekly_summary(message, user, tz):
-    await message.reply_text("Crunching this week's numbers…")
-    await message.reply_text(format_weekly_report(user["id"], dt.datetime.now(tz).date()))
-
-
-async def _handle_general_question(message, user, tz, parsed):
+async def _handle_general_question(message, parsed):
     query = parsed.get("query") or {}
     question = query.get("text") or parsed.get("notes") or ""
     if question:
