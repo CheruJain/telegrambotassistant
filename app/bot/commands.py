@@ -139,10 +139,31 @@ async def reminders_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not reminders:
         await update.message.reply_text("No pending reminders.")
         return
+
+    # Also enrich older pending reminders using the current saved phone number.
+    booked_calls = repo.get_sales_calls(user["id"], "2000-01-01", "2100-12-31")
+    booked_calls = [
+        c for c in booked_calls
+        if c.get("outcome") == "Booked" and c.get("lead_name") and c.get("phone_number")
+    ]
+
     lines = ["PENDING REMINDERS", ""]
     for reminder in reminders:
         trigger = _local_dt(reminder["trigger_time"], tz)
-        lines.append(f"• {trigger.strftime('%d-%b-%Y')} at {trigger.strftime('%I:%M %p').lstrip('0')} — {reminder.get('reminder_text') or 'Reminder'}")
+        reminder_text = reminder.get("reminder_text") or "Reminder"
+
+        if "phone:" not in reminder_text.lower():
+            matches = [
+                c for c in booked_calls
+                if c["lead_name"].lower() in reminder_text.lower()
+            ]
+            if len(matches) == 1:
+                reminder_text = f"{reminder_text}\nPhone: {matches[0]['phone_number']}"
+
+        lines.append(
+            f"• {trigger.strftime('%d-%b-%Y')} at "
+            f"{trigger.strftime('%I:%M %p').lstrip('0')} — {reminder_text}"
+        )
     await update.message.reply_text("\n".join(lines))
 
 
