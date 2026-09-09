@@ -10,6 +10,7 @@ from app.config.settings import settings
 from app.database import repository as repo
 from app.bot import commands as cmd
 from app.bot.handlers import handle_text_message, handle_voice_message
+from app.bot.history_handler import handle_history_question
 from app.bot.sales_update_handler import (
     _handle_selection,
     _extract_name,
@@ -45,6 +46,8 @@ async def _handle_all_text(update, context):
 
     text = (update.message.text or "").strip()
     if text and update.effective_user.id == settings.TELEGRAM_USER_ID:
+        if await handle_history_question(update.message, repo.get_or_create_user(update.effective_user.id, update.effective_user.first_name), None, text):
+            return
         name = _extract_name(text)
         is_meeting = bool(re.search(r"\bmeeting\b", text, re.I))
         sales_cancel = _is_cancel_message(text) and not is_meeting
