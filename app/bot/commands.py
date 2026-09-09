@@ -4,6 +4,7 @@ Deterministic slash-commands. These never call the AI.
 from __future__ import annotations
 
 import datetime as dt
+import re
 
 import pytz
 from telegram import Update
@@ -140,7 +141,6 @@ async def reminders_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No pending reminders.")
         return
 
-    # Also enrich older pending reminders using the current saved phone number.
     booked_calls = repo.get_sales_calls(user["id"], "2000-01-01", "2100-12-31")
     booked_calls = [
         c for c in booked_calls
@@ -153,12 +153,33 @@ async def reminders_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reminder_text = reminder.get("reminder_text") or "Reminder"
 
         if "phone:" not in reminder_text.lower():
-            matches = [
+            lead_matches = [
                 c for c in booked_calls
                 if c["lead_name"].lower() in reminder_text.lower()
+                and c.get("booked_date") == trigger.date().isoformat()
             ]
-            if len(matches) == 1:
-                reminder_text = f"{reminder_text}\nPhone: {matches[0]['phone_number']}"
+
+            # If the reminder mentions the sales-call time, use it to identify
+            # the exact booked call when the same lead has multiple bookings.
+            time_match = re.search(r"sales call at (\d{1,2}:\d{2})\s*(AM|PM)", reminder_text, re.I)
+            if time_match:
+                try:
+                    parsed_time = dt.datetime.strptime(
+                        f"{time_match.group(1)} {time_match.group(2).upper()}",
+                        "%I:%M %p",
+                    ).time()
+                    exact_matches = [
+                        c for c in lead_matches
+                        if c.get("booked_time")
+                        and str(c["booked_time"])[:5] == parsed_time.strftime("%H:%M")
+                    ]
+                    if exact_matches:
+                        lead_matches = exact_matches
+                except ValueError:
+                    pass
+
+            if len(lead_matches) == 1:
+                reminder_text = f"{reminder_text}\nPhone: {lead_matches[0]['phone_number']}"
 
         lines.append(
             f"• {trigger.strftime('%d-%b-%Y')} at "
