@@ -62,6 +62,7 @@ Rules:
 - For a specific booked lead, extract lead_name, phone_number, booked_date, booked_time and call_type when provided.
 - For ordinary aggregate sales logging, use log_sales and fill only the counts actually stated.
 - For analytics questions, use query_stats and always fill query.metric. Use query.period for phrases such as "this week" and query.text for the user's actual question.
+- For a request asking what the user has done, worked on, completed, or logged over a date range (for example, "what have I done since 15 August", "15 August se abhi tak kya kya kiya"), use query_stats with metric=general, topic=general, period=custom, and extract the start date into query.start_date and the end date into query.end_date. If the end is "now", "abhi", or "till now", set query.end_date to null so the application uses today's date.
 - Questions about sales objections or objection patterns should use query_stats with metric=objections.
 - Do not classify a normal work-log sentence as general_question.
 - Use general_question only for genuine conversation/questions that do not map to another supported action.
