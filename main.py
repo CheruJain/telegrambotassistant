@@ -4,6 +4,7 @@ Entrypoint. Run with: python main.py
 import logging
 import re
 
+import pytz
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
 from app.config.settings import settings
@@ -46,7 +47,9 @@ async def _handle_all_text(update, context):
 
     text = (update.message.text or "").strip()
     if text and update.effective_user.id == settings.TELEGRAM_USER_ID:
-        if await handle_history_question(update.message, repo.get_or_create_user(update.effective_user.id, update.effective_user.first_name), None, text):
+        user = repo.get_or_create_user(update.effective_user.id, update.effective_user.first_name)
+        tz = pytz.timezone(user.get("timezone") or settings.DEFAULT_TIMEZONE)
+        if await handle_history_question(update.message, user, tz, text):
             return
         name = _extract_name(text)
         is_meeting = bool(re.search(r"\bmeeting\b", text, re.I))
