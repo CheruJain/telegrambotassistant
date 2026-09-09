@@ -46,7 +46,7 @@ def _is_update_message(text: str) -> bool:
     return bool(
         re.search(r"\b(update|change|edit)\b", low)
         or re.search(r"\b(?:ka|ki|ke)\s+(?:number|phone|call|status|type)\b", low)
-    ) and bool(_PHONE_RE.search(text) or re.search(r"\b(?:discovery|follow\s*up|demo|closing)\b", low))
+    ) and bool(_PHONE_RE.search(text) or re.search(r"\b(?:discovery|follow\s*up|demo|closing|strategy|completed|complete|interested|won|lost)\b", low))
 
 
 def _date_from_text(text: str, today: dt.date) -> dt.date | None:
@@ -191,6 +191,11 @@ async def _handle_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     context.user_data.pop("pending_sales_selection", None)
     await _apply_update(update.message, target, pending["updates"])
     return True
+
+
+async def handle_sales_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle a numeric reply to a pending booking-selection prompt."""
+    await _handle_selection(update, context)
 
 
 async def _handle_cancel(update: Update, name: str, context: ContextTypes.DEFAULT_TYPE) -> bool:
