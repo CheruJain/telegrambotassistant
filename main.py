@@ -16,7 +16,13 @@ from app.config.settings import settings
 from app.database import repository as repo
 from app.bot import commands as cmd
 from app.bot.handlers import handle_text_message, handle_voice_message
-from app.bot.sales_update_handler import handle_possible_sales_update
+from app.bot.sales_update_handler import (
+    _handle_selection,
+    _extract_name,
+    _is_cancel_message,
+    _is_update_message,
+    handle_possible_sales_update,
+)
 from app.reminders.scheduler import ReminderScheduler
 
 logging.basicConfig(
@@ -40,6 +46,20 @@ async def _post_init(application: Application):
     logger.info("Assistant ready for user %s", settings.TELEGRAM_USER_ID)
 
 
+async def _handle_all_text(update, context):
+    if await _handle_selection(update, context):
+        return
+
+    text = (update.message.text or "").strip()
+    if text and update.effective_user.id == settings.TELEGRAM_USER_ID:
+        name = _extract_name(text)
+        if name and (_is_cancel_message(text) or _is_update_message(text)):
+            await handle_possible_sales_update(update, context)
+            return
+
+    await handle_text_message(update, context)
+
+
 def build_application() -> Application:
     application = Application.builder().token(settings.TELEGRAM_BOT_TOKEN).post_init(_post_init).build()
 
@@ -54,9 +74,7 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("stats", cmd.stats_cmd))
 
     application.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
-    # Let the sales update handler also receive follow-up selection replies such as "1".
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_possible_sales_update))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _handle_all_text))
 
     return application
 
