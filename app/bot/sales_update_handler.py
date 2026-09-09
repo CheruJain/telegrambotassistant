@@ -88,10 +88,7 @@ def _find_booked_calls(db, user_id: str, name: str) -> list[dict]:
         .order("booked_time")
         .execute()
     )
-    return [
-        row for row in (result.data or [])
-        if name.lower() in (row.get("lead_name") or "").lower()
-    ]
+    return [row for row in (result.data or []) if name.lower() in (row.get("lead_name") or "").lower()]
 
 
 def _format_match(row: dict) -> str:
@@ -111,7 +108,92 @@ def _format_match(row: dict) -> str:
     return f"{date} {time} — {call_type}{extra}"
 
 
-async def _handle_cancel(update: Update, name: str) -> bool:
+def _extract_updates(text: str) -> dict:
+    updates = {}
+    phone = _PHONE_RE.search(text)
+    if phone:
+        updates["phone_number"] = phone.group(0).replace(" ", "").replace("-", "")
+
+    low = text.lower()
+    call_types = {
+        "discovery": "Discovery",
+        "follow up": "Follow Up",
+        "follow-up": "Follow Up",
+        "demo": "Demo",
+        "closing": "Closing",
+        "strategy": "Strategy",
+    }
+    for key, value in call_types.items():
+        if key in low:
+            updates["call_type"] = value
+            break
+
+    status_map = {
+        "not interested": "Not Interested",
+        "rescheduled": "Rescheduled",
+        "interested": "Interested",
+        "booked": "Booked",
+        "won": "Won",
+        "lost": "Lost",
+        "completed": "Completed",
+        "complete": "Completed",
+    }
+    for key, value in status_map.items():
+        if key in low:
+            updates["outcome"] = value
+            break
+    return updates
+
+
+async def _apply_update(message, target: dict, updates: dict) -> bool:
+    if not updates:
+        await message.reply_text("I couldn't find a detail to update.")
+        return False
+    db = get_client()
+    result = db.table("sales_calls").update(updates).eq("id", target["id"]).execute()
+    if not result.data:
+        await message.reply_text("I couldn't update that booked call. Please try again.")
+        return False
+
+    changed = []
+    if "phone_number" in updates:
+        changed.append("phone number")
+    if "call_type" in updates:
+        changed.append("call type")
+    if "outcome" in updates:
+        changed.append("status")
+    await message.reply_text(f"Updated {target['lead_name']}: {', '.join(changed)}.")
+    return True
+
+
+async def _handle_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    pending = context.user_data.get("pending_sales_selection")
+    if not pending:
+        return False
+    text = (update.message.text or "").strip()
+    if not re.fullmatch(r"\d+", text):
+        return False
+    index = int(text) - 1
+    if index < 0 or index >= len(pending["ids"]):
+        await update.message.reply_text("Please choose one of the listed numbers.")
+        return True
+
+    db = get_client()
+    user_id = _get_user_id(db, update.effective_user.id)
+    rows = _find_booked_calls(db, user_id, pending["name"])
+    by_id = {str(row["id"]): row for row in rows}
+    target = by_id.get(str(pending["ids"][index]))
+    if not target:
+        context.user_data.pop("pending_sales_selection", None)
+        await update.message.reply_text("That booking is no longer available. Please send the update again.")
+        return True
+
+    context.user_data.pop("pending_sales_selection", None)
+    await _apply_update(update.message, target, pending["updates"])
+    return True
+
+
+async def _handle_cancel(update: Update, name: str, context: ContextTypes.DEFAULT_TYPE) -> bool:
     message = update.message
     db = get_client()
     user_id = _get_user_id(db, update.effective_user.id)
@@ -119,13 +201,12 @@ async def _handle_cancel(update: Update, name: str) -> bool:
     if not matches:
         return False
 
-    target_date = _date_from_text((message.text or ""), dt.datetime.now().date())
-    if target_date:
-        dated = [r for r in matches if r.get("booked_date") == target_date.isoformat()]
-        if dated:
-            matches = dated
-
     if len(matches) > 1:
+        context.user_data["pending_sales_selection"] = {
+            "name": name,
+            "ids": [str(r["id"]) for r in matches],
+            "updates": {"outcome": "Cancelled"},
+        }
         lines = [f"I found {len(matches)} booked calls for {name}. Which one should I cancel?"]
         for i, row in enumerate(matches, 1):
             lines.append(f"{i}. {_format_match(row)}")
@@ -133,24 +214,7 @@ async def _handle_cancel(update: Update, name: str) -> bool:
         return True
 
     target = matches[0]
-    db.table("sales_calls").update({"outcome": "Cancelled"}).eq("id", target["id"]).execute()
-
-    # Cancel any reminder tied to the matching meeting/call so it cannot fire later.
-    meeting_result = (
-        db.table("meetings")
-        .select("id")
-        .eq("user_id", user_id)
-        .neq("status", "cancelled")
-        .ilike("person", target.get("lead_name") or name)
-        .execute()
-    )
-    for meeting in meeting_result.data or []:
-        db.table("reminders").update({"status": "cancelled"}).eq(
-            "related_meeting_id", meeting["id"]
-        ).eq("status", "pending").execute()
-        db.table("meetings").update({"status": "cancelled"}).eq("id", meeting["id"]).execute()
-
-    await message.reply_text(f"Cancelled: {target.get('lead_name') or name} — {_format_match(target)}.")
+    await _apply_update(message, target, {"outcome": "Cancelled"})
     return True
 
 
@@ -160,12 +224,15 @@ async def handle_possible_sales_update(update: Update, context: ContextTypes.DEF
     if not text or update.effective_user.id != settings.TELEGRAM_USER_ID:
         return
 
+    if await _handle_selection(update, context):
+        return
+
     name = _extract_name(text)
     if not name:
         return
 
     if _is_cancel_message(text):
-        await _handle_cancel(update, name)
+        await _handle_cancel(update, name, context)
         return
 
     if not _is_update_message(text):
@@ -178,71 +245,26 @@ async def handle_possible_sales_update(update: Update, context: ContextTypes.DEF
         await message.reply_text(f"I couldn't find a booked call for {name}.")
         return
 
-    # Never guess when the same lead name exists more than once.
-    phone = _PHONE_RE.search(text)
-    phone_value = phone.group(0).replace(" ", "").replace("-", "") if phone else None
+    updates = _extract_updates(text)
+    phone_value = updates.get("phone_number")
     if phone_value:
-        phone_matches = [r for r in matches if (r.get("phone_number") or "").replace(" ", "").replace("-", "") == phone_value]
+        phone_matches = [
+            r for r in matches
+            if (r.get("phone_number") or "").replace(" ", "").replace("-", "") == phone_value
+        ]
         if phone_matches:
             matches = phone_matches
 
-    target_date = _date_from_text(text, dt.datetime.now().date())
-    if target_date:
-        dated = [r for r in matches if r.get("booked_date") == target_date.isoformat()]
-        if dated:
-            matches = dated
-
     if len(matches) > 1:
+        context.user_data["pending_sales_selection"] = {
+            "name": name,
+            "ids": [str(r["id"]) for r in matches],
+            "updates": updates,
+        }
         lines = [f"I found {len(matches)} booked calls for {name}. Which one do you mean?"]
         for i, row in enumerate(matches, 1):
             lines.append(f"{i}. {_format_match(row)}")
         await message.reply_text("\n".join(lines))
         return
 
-    target = matches[0]
-    updates = {}
-    if phone_value:
-        updates["phone_number"] = phone_value
-
-    low = text.lower()
-    call_types = {
-        "discovery": "Discovery",
-        "follow up": "Follow Up",
-        "follow-up": "Follow Up",
-        "demo": "Demo",
-        "closing": "Closing",
-    }
-    for key, value in call_types.items():
-        if key in low:
-            updates["call_type"] = value
-            break
-
-    status_map = {
-        "booked": "Booked",
-        "rescheduled": "Rescheduled",
-        "interested": "Interested",
-        "not interested": "Not Interested",
-        "won": "Won",
-        "lost": "Lost",
-    }
-    for key, value in status_map.items():
-        if key in low:
-            updates["outcome"] = value
-            break
-
-    if not updates:
-        return
-
-    updated = db.table("sales_calls").update(updates).eq("id", target["id"]).execute()
-    if not updated.data:
-        await message.reply_text("I couldn't update that booked call. Please try again.")
-        return
-
-    changed = []
-    if "phone_number" in updates:
-        changed.append("phone number")
-    if "call_type" in updates:
-        changed.append("call type")
-    if "outcome" in updates:
-        changed.append("status")
-    await message.reply_text(f"Updated {target['lead_name']}: {', '.join(changed)}.")
+    await _apply_update(message, matches[0], updates)
