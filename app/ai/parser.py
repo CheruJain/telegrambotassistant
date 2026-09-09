@@ -33,7 +33,7 @@ _WEEKDAYS = {
     "thursday": TH, "thu": TH, "guruvar": TH,
     "friday": FR, "fri": FR, "shukravar": FR,
     "saturday": SA, "sat": SA, "shanivar": SA,
-    "sunday": SU, "sun": SU, "raviwar": SU, "ravivar": SU,
+    "sunday": SU, "sun": SU, "raviwar": WE, "ravivar": SU,
 }
 
 # Prefer an explicit clock marker (6pm, 11:30 am, 4 baje). A bare number
@@ -112,7 +112,9 @@ def resolve_datetime(
     if now.tzinfo is None:
         now = tz.localize(now)
 
-    p = phrase.strip().lower()
+    # Users often type times like "5;30" in Telegram. Treat a semicolon
+    # between digits exactly like a colon.
+    p = re.sub(r"(?<=\d)\s*;\s*(?=\d)", ":", phrase.strip().lower())
     base_date = now.date()
     time_part: Optional[dt.time] = None
 
@@ -128,7 +130,6 @@ def resolve_datetime(
     elif "yesterday" in p:
         base_date = now.date() - dt.timedelta(days=1)
 
-    # --- "in N minutes/hours" ---
     m = re.search(
         r"(\d+)\s*(minute|min|hour|hr|ghante|ghanta)s?\s*(mein|me|later|from now)?",
         p,
@@ -147,7 +148,6 @@ def resolve_datetime(
             break
 
     # --- explicit clock time ---
-    # Never interpret the day number in a date such as "15 sep" as a time.
     hm = _HOUR_WORD.search(p) or _BARE_HOUR.search(p)
     if hm and hm.group(1):
         hour = int(hm.group(1))
@@ -163,8 +163,6 @@ def resolve_datetime(
 
         time_part = dt.time(hour=hour, minute=minute)
 
-    # If we have an explicit clock plus an explicit calendar date, parse the
-    # date portion separately. This fixes phrases such as "15 sep ko 6pm".
     if time_part is not None and not any(word in p for word in ("kal", "tomorrow", "yesterday", "aaj", "today", "parso")):
         try:
             date_phrase = _HOUR_WORD.sub(" ", p)
