@@ -40,6 +40,14 @@ def _safe(value: object) -> str:
     return html.escape(str(value or ""), quote=False)
 
 
+def _date_group_label(value: dt.date, today: dt.date) -> str:
+    if value == today:
+        return f"📅  TODAY • {value.strftime('%d %b')}"
+    if value == today + dt.timedelta(days=1):
+        return f"📅  TOMORROW • {value.strftime('%d %b')}"
+    return f"📅  {value.strftime('%d %b %Y')}"
+
+
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = _get_user(update)
     await update.message.reply_text(
@@ -81,7 +89,6 @@ def _format_daily(data: dict, today: dt.date) -> str:
         "",
         "<b>🤝  MEETINGS</b>",
     ]
-
     if data["meetings"]:
         tz = pytz.timezone(settings.DEFAULT_TIMEZONE)
         for m in data["meetings"]:
@@ -92,25 +99,15 @@ def _format_daily(data: dict, today: dt.date) -> str:
             lines.append(f"• <b>{_fmt_time(start)}</b> ── {_safe(m.get('title') or 'Meeting')}")
     else:
         lines.append("• No meetings today")
-
     lines.extend(["", "<b>📊  SALES PIPELINE</b>"])
-    lines.append(
-        f"• Calls: {s['total_calls']}  |  Won: {s['won']}  |  Follow-ups: {s['follow_ups']}"
-    )
-
+    lines.append(f"• Calls: {s['total_calls']}  |  Won: {s['won']}  |  Follow-ups: {s['follow_ups']}")
     lines.extend(["", "<b>📝  CONTENT</b>"])
     if c["by_platform_account"]:
         for k, v in c["by_platform_account"].items():
             lines.append(f"• {_safe(k)}: {v}")
     else:
         lines.append("• No logs today")
-
-    lines.extend([
-        "",
-        "<b>⏳  PENDING</b>",
-        f"• {len(data['pending_reminders'])} Reminders in queue",
-        "━━━━━━━━━━━━━━━━━━━━",
-    ])
+    lines.extend(["", "<b>⏳  PENDING</b>", f"• {len(data['pending_reminders'])} Reminders in queue", "━━━━━━━━━━━━━━━━━━━━"])
     return "\n".join(lines)
 
 
@@ -139,67 +136,31 @@ async def meetings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         key = (call.get("booked_date"), str(call.get("booked_time") or "")[:5])
         booked_by_date.setdefault(key, []).append(call)
 
-    lines = ["UPCOMING MEETINGS (next 7 days)", ""]
-    current_day = None
-    for m in meetings:
-        start = _local_dt(m["start_time"], tz)
-        day_label = start.strftime("%d-%b-%Y")
-        if day_label != current_day:
-            lines.append(f"\n{day_label}")
-            current_day = day_label
-        time_label = _fmt_time(start)
-        title = m.get("title") or "Meeting"
-        person = (m.get("person") or "").strip()
-        if person and person.lower() in title.lower():
-            display = title
-        elif person:
-            display = f"{title} with {person}"
-        else:
-            display = title
-        lines.append(f"  {time_label} — {display}")
-
-        matches = booked_by_date.get((start.date().isoformat(), start.strftime("%H:%M")), [])
+    grouped: dict[dt.date, list[str]] = {}
+    for meeting in meetings:
+        start = _local_dt(meeting["start_time"], tz)
+        title = (meeting.get("title") or "Meeting").strip()
+        person = (meeting.get("person") or "").strip()
+        display = title if not person or person.lower() in title.lower() else f"{title} with {person}"
         phones = []
-        for call in matches:
+        for call in booked_by_date.get((start.date().isoformat(), start.strftime("%H:%M")), []):
             lead = (call.get("lead_name") or "").lower()
             if person and (person.lower() in lead or lead in person.lower()):
                 phone = str(call.get("phone_number") or "").strip()
                 if phone and phone not in phones:
                     phones.append(phone)
+        entry = f"• <b>{_fmt_time(start)}</b> ── {_safe(display)}"
         if phones:
-            lines.append(f"  Phone: {', '.join(phones)}")
-    await update.message.reply_text("\n".join(lines))
+            entry += "\n  📞 " + " | ".join(f"<code>{_safe(phone)}</code>" for phone in phones)
+        grouped.setdefault(start.date(), []).append(entry)
 
-
-def _clean_reminder_text(text: str) -> tuple[str, str | None, str | None]:
-    """Return action text, optional lead/name, and optional sales-call time."""
-    value = re.sub(r"^Confirm attendance:\s*", "", text, flags=re.I).strip()
-    value = re.sub(r"^Reminder:\s*", "", value, flags=re.I).strip()
-    value = re.sub(r"\nPhone:\s*\+?[\d\s()-]+\s*$", "", value, flags=re.I).strip()
-
-    call_match = re.search(r"sales call at\s+(\d{1,2}:\d{2}\s*(?:AM|PM))", value, re.I)
-    call_time = call_match.group(1).upper() if call_match else None
-
-    name = None
-    if "sales call at" in value.lower():
-        prefix = re.split(r"\s*[—-]?\s*sales call at\s+", value, flags=re.I)[0].strip(" —-")
-        if prefix:
-            name = prefix
-            action = f"Sales call at {call_time}" if call_time else "Sales call"
-        else:
-            action = value
-    else:
-        action = value
-
-    return action, name, call_time
-
-
-def _reminder_group_label(date_value: dt.date, today: dt.date) -> str:
-    if date_value == today:
-        return f"📅  TODAY • {date_value.strftime('%d %b')}"
-    if date_value == today + dt.timedelta(days=1):
-        return f"📅  TOMORROW • {date_value.strftime('%d %b')}"
-    return f"📅  {date_value.strftime('%d %b %Y')}"
+    lines = ["<b>🤝  SCHEDULED MEETINGS</b>", "━━━━━━━━━━━━━━━━━━━━", ""]
+    for date_value in sorted(grouped):
+        lines.append(f"<b>{_date_group_label(date_value, now.date())}</b>")
+        lines.extend(grouped[date_value])
+        lines.append("")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 async def reminders_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -210,82 +171,52 @@ async def reminders_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not reminders:
         await update.message.reply_text("No pending reminders.")
         return
-
-    booked_calls = repo.get_sales_calls(user["id"], "2000-01-01", "2100-12-31")
-    booked_calls = [
-        c for c in booked_calls
-        if c.get("outcome") == "Booked" and c.get("lead_name") and c.get("phone_number")
-    ]
-
+    booked_calls = [c for c in repo.get_sales_calls(user["id"], "2000-01-01", "2100-12-31") if c.get("outcome") == "Booked" and c.get("lead_name") and c.get("phone_number")]
     now = dt.datetime.now(tz)
-    today = now.date()
     grouped: dict[dt.date, list[str]] = {}
-
     for reminder in reminders:
         trigger = _local_dt(reminder["trigger_time"], tz)
         raw_text = reminder.get("reminder_text") or "Reminder"
         reminder_text = raw_text
         phone = None
-
         if "phone:" not in reminder_text.lower():
-            lead_matches = [
-                c for c in booked_calls
-                if c["lead_name"].lower() in reminder_text.lower()
-                and c.get("booked_date") == trigger.date().isoformat()
-            ]
+            lead_matches = [c for c in booked_calls if c["lead_name"].lower() in reminder_text.lower() and c.get("booked_date") == trigger.date().isoformat()]
             time_match = re.search(r"sales call at (\d{1,2}:\d{2})\s*(AM|PM)", reminder_text, re.I)
             if time_match:
                 try:
-                    parsed_time = dt.datetime.strptime(
-                        f"{time_match.group(1)} {time_match.group(2).upper()}", "%I:%M %p"
-                    ).time()
-                    exact_matches = [
-                        c for c in lead_matches
-                        if c.get("booked_time") and str(c["booked_time"])[:5] == parsed_time.strftime("%H:%M")
-                    ]
-                    if exact_matches:
-                        lead_matches = exact_matches
+                    parsed_time = dt.datetime.strptime(f"{time_match.group(1)} {time_match.group(2).upper()}", "%I:%M %p").time()
+                    exact = [c for c in lead_matches if c.get("booked_time") and str(c["booked_time"])[:5] == parsed_time.strftime("%H:%M")]
+                    if exact:
+                        lead_matches = exact
                 except ValueError:
                     pass
             if len(lead_matches) == 1:
                 phone = str(lead_matches[0]["phone_number"]).strip()
         else:
-            phone_match = re.search(r"phone:\s*(\+?[\d\s()-]+)", reminder_text, re.I)
-            if phone_match:
-                phone = phone_match.group(1).strip()
-
-        action, name, call_time = _clean_reminder_text(reminder_text)
-        if name:
-            display_name = name
-        else:
-            display_name = action
-
-        entry = f"• <b>{_fmt_time(trigger)}</b> ── {_safe(display_name)}"
-        if phone:
-            entry += f"\n  📞 <code>{_safe(phone)}</code>"
-        if name and call_time:
-            entry += f"\n  ↳ Sales call at {_safe(call_time)}"
-        elif action and action != display_name:
+            match = re.search(r"phone:\s*(\+?[\d\s()-]+)", reminder_text, re.I)
+            if match:
+                phone = match.group(1).strip()
+        value = re.sub(r"^Confirm attendance:\s*|^Reminder:\s*", "", reminder_text, flags=re.I).strip()
+        call_match = re.search(r"sales call at\s+(\d{1,2}:\d{2}\s*(?:AM|PM))", value, re.I)
+        if call_match:
+            name = re.split(r"\s*[—-]?\s*sales call at\s+", value, flags=re.I)[0].strip(" —-")
+            action = f"Sales call at {call_match.group(1).upper()}"
+            entry = f"• <b>{_fmt_time(trigger)}</b> ── {_safe(name)}"
+            if phone:
+                entry += f"\n  📞 <code>{_safe(phone)}</code>"
             entry += f"\n  ↳ {_safe(action)}"
-        elif action and not name:
-            entry = f"• <b>{_fmt_time(trigger)}</b> ── {_safe(action)}"
-
+        else:
+            value = re.sub(r"\nPhone:\s*\+?[\d\s()-]+\s*$", "", value, flags=re.I).strip()
+            entry = f"• <b>{_fmt_time(trigger)}</b> ── {_safe(value)}"
+            if phone:
+                entry += f"\n  📞 <code>{_safe(phone)}</code>"
         grouped.setdefault(trigger.date(), []).append(entry)
-
-    lines = [
-        "<b>🔔  PENDING REMINDERS</b>",
-        "━━━━━━━━━━━━━━━━━━━━",
-        "",
-    ]
+    lines = ["<b>🔔  PENDING REMINDERS</b>", "━━━━━━━━━━━━━━━━━━━━", ""]
     for date_value in sorted(grouped):
-        lines.append(f"<b>{_reminder_group_label(date_value, today)}</b>")
+        lines.append(f"<b>{_date_group_label(date_value, now.date())}</b>")
         lines.extend(grouped[date_value])
         lines.append("")
-
-    lines.extend([
-        "━━━━━━━━━━━━━━━━━━━━",
-        f"<b>Total: {len(reminders)} reminders queued</b>",
-    ])
+    lines.extend(["━━━━━━━━━━━━━━━━━━━━", f"<b>Total: {len(reminders)} reminders queued</b>"])
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
