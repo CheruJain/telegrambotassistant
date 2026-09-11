@@ -1,4 +1,4 @@
-"""Inline Telegram actions for reminders, scheduling conflicts and social check-ins."""
+"""Inline Telegram actions for reminders, scheduling conflicts, social check-ins and sales pipeline."""
 from __future__ import annotations
 import datetime as dt
 import re
@@ -8,6 +8,7 @@ from telegram.ext import ContextTypes
 from app.config.settings import settings
 from app.database import repository as repo
 from app.bot.social_tracking import handle_social_callback
+from app.bot.pipeline import pipeline_callback_handler
 PENDING_CONFLICTS: dict[str, dict] = {}
 def _phone(value: object) -> str:
     raw=re.sub(r"\D","",str(value or ""));return "91"+raw if len(raw)==10 else raw
@@ -21,6 +22,7 @@ def action_keyboard(phone:str|None=None,reminder_id:str|None=None)->InlineKeyboa
 def conflict_keyboard()->InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("Override",callback_data="conflict:override"),InlineKeyboardButton("Move to 4:30",callback_data="conflict:move430")]])
 async def callback_handler(update:Update,context:ContextTypes.DEFAULT_TYPE):
+    if await pipeline_callback_handler(update,context): return
     query=update.callback_query;data=query.data or ""
     if await handle_social_callback(update,context): return
     await query.answer();user=repo.get_or_create_user(update.effective_user.id,update.effective_user.first_name)
