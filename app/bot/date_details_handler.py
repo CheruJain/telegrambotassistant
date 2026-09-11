@@ -10,11 +10,10 @@ from app.database import repository as repo
 from app.database.client import get_client
 
 _MONTHS = {
-    "jan": 1, "january": 1, "feb": 2, "february": 2,
-    "mar": 3, "march": 3, "apr": 4, "april": 4, "may": 5,
-    "jun": 6, "june": 6, "jul": 7, "july": 7, "aug": 8, "august": 8,
-    "sep": 9, "sept": 9, "september": 9, "oct": 10, "october": 10,
-    "nov": 11, "november": 11, "dec": 12, "december": 12,
+    "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+    "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+    "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9, "oct": 10,
+    "october": 10, "nov": 11, "november": 11, "dec": 12, "december": 12,
 }
 
 
@@ -48,6 +47,11 @@ def _local_dt(value: str, tz) -> dt.datetime:
     return parsed.astimezone(tz)
 
 
+def _phones_for_call(call: dict) -> str | None:
+    phone = str(call.get("phone_number") or "").strip()
+    return phone or None
+
+
 def _phone_for_meeting(meeting: dict, booked_calls: list[dict], tz) -> str | None:
     person = (meeting.get("person") or "").strip().lower()
     start = meeting.get("start_time")
@@ -62,15 +66,33 @@ def _phone_for_meeting(meeting: dict, booked_calls: list[dict], tz) -> str | Non
     phones = []
     for call in booked_calls:
         lead = (call.get("lead_name") or "").strip().lower()
-        if not lead or call.get("booked_date") != target_date:
-            continue
-        if str(call.get("booked_time") or "")[:5] != target_time:
+        if not lead or call.get("booked_date") != target_date or str(call.get("booked_time") or "")[:5] != target_time:
             continue
         if person and (person in lead or lead in person):
-            phone = str(call.get("phone_number") or "").strip()
+            phone = _phones_for_call(call)
             if phone and phone not in phones:
                 phones.append(phone)
     return ", ".join(phones) if phones else None
+
+
+def _phone_for_reminder(reminder: dict, meetings: list[dict], booked_calls: list[dict], tz) -> str | None:
+    related_id = reminder.get("related_meeting_id")
+    if related_id:
+        for meeting in meetings:
+            if meeting.get("id") == related_id:
+                phone = _phone_for_meeting(meeting, booked_calls, tz)
+                if phone:
+                    return phone
+
+    reminder_text = str(reminder.get("reminder_text") or "").lower()
+    matches = []
+    for call in booked_calls:
+        lead = str(call.get("lead_name") or "").strip().lower()
+        if lead and lead in reminder_text:
+            matches.append(call)
+    if len(matches) == 1:
+        return _phones_for_call(matches[0])
+    return None
 
 
 def _get_reminders_in_range(user_id: str, start_iso: str, end_iso: str) -> list[dict]:
@@ -112,6 +134,9 @@ async def handle_date_details(message, user: dict, text: str) -> bool:
         for reminder in reminders:
             trigger = _local_dt(reminder["trigger_time"], tz)
             lines.append(f"• {trigger.strftime('%I:%M %p').lstrip('0')} — {reminder.get('reminder_text') or 'Reminder'}")
+            phone = _phone_for_reminder(reminder, meetings, booked_calls, tz)
+            if phone:
+                lines.append(f"  Phone: {phone}")
     else:
         lines.append("• None")
 
