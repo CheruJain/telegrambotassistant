@@ -31,6 +31,12 @@ class Settings:
     SUPABASE_URL: str = _get_required("SUPABASE_URL")
     SUPABASE_KEY: str = _get_required("SUPABASE_KEY")
 
+    # --- Optional WhatsApp Business Cloud API ---
+    WHATSAPP_ENABLED: bool = os.getenv("WHATSAPP_ENABLED", "false").lower() == "true"
+    WHATSAPP_ACCESS_TOKEN: str = os.getenv("WHATSAPP_ACCESS_TOKEN", "")
+    WHATSAPP_PHONE_NUMBER_ID: str = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
+    WHATSAPP_GRAPH_API_VERSION: str = os.getenv("WHATSAPP_GRAPH_API_VERSION", "v23.0")
+
     # --- Tunable defaults (overridable per-user in DB) ---
     AI_MODEL: str = os.getenv("AI_MODEL", "gemini-2.5-flash")
     DEFAULT_TIMEZONE: str = os.getenv("DEFAULT_TIMEZONE", "Asia/Kolkata")
