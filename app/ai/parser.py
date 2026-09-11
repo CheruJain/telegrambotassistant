@@ -37,7 +37,7 @@ _WEEKDAYS = {
 }
 
 _HOUR_WORD = re.compile(
-    r"(\d{1,2})(?::(\d{2}))?\s*(am|pm|baje)\b",
+    r"(\d{1,2})(?::(\d{2}))?\s*(am|pm|baje|bje)\b",
     re.IGNORECASE,
 )
 _BARE_HOUR = re.compile(r"\b(\d{1,2})(?::(\d{2}))?\s*o['’]?clock\b", re.IGNORECASE)
@@ -90,8 +90,8 @@ def resolve_datetime(
     if now.tzinfo is None:
         now = tz.localize(now)
 
-    # Telegram users may type 5;30. Treat a semicolon between digits as a colon.
     p = re.sub(r"(?<=\d)\s*;\s*(?=\d)", ":", phrase.strip().lower())
+    p = re.sub(r"\bbje\b", "baje", p)
     base_date = now.date()
     time_part: Optional[dt.time] = None
 
@@ -132,7 +132,22 @@ def resolve_datetime(
             hour += 12
         time_part = dt.time(hour=hour, minute=minute)
 
-    if time_part is not None and not any(word in p for word in ("kal", "tomorrow", "yesterday", "aaj", "today", "parso")):
+    has_explicit_date = bool(
+        re.search(r"\b(?:kal|tomorrow|yesterday|aaj|today|parso)\b", p)
+        or re.search(r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\b", p)
+        or any(re.search(rf"\b{word}\b", p) for word in _WEEKDAYS)
+    )
+
+    # A bare time such as "2 baje" is a time-of-day request, never a date.
+    # If it has already passed today, move it to the next day rather than
+    # letting dateutil invent a past calendar date.
+    if time_part is not None and not has_explicit_date:
+        candidate = tz.localize(dt.datetime.combine(now.date(), time_part))
+        if candidate <= now:
+            candidate += dt.timedelta(days=1)
+        return candidate
+
+    if time_part is not None:
         try:
             date_phrase = _HOUR_WORD.sub(" ", p)
             date_phrase = _BARE_HOUR.sub(" ", date_phrase)
