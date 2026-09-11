@@ -1,22 +1,23 @@
 """Deterministic contact/phone lookup for natural-language requests."""
 from __future__ import annotations
 
+import html
 import re
 
-from app.database import repository as repo
 from app.database.supabase_client import get_client
-
 
 _NUMBER_WORDS = r"(?:number|mumber|phone|mobile|contact)"
 _REQUEST_WORDS = r"(?:bhej(?:na)?|send|give|do|de(?:na)?|bata(?:na)?|bta(?:na)?|chahiye|\?)"
 
 
 def is_contact_lookup(text: str) -> bool:
-    """Return True for phone-number requests, but not updates/details."""
     value = text.strip().lower()
     if not value or re.search(r"\b(?:update|change|edit|details?)\b", value):
         return False
-    return bool(re.search(rf"\b{_NUMBER_WORDS}\b", value) and re.search(_REQUEST_WORDS, value))
+    return bool(
+        re.search(rf"\b(?:ka|ki|ke)\s+{_NUMBER_WORDS}\b", value)
+        or (re.search(rf"\b{_NUMBER_WORDS}\b", value) and re.search(_REQUEST_WORDS, value))
+    )
 
 
 def _extract_names(text: str) -> list[str]:
@@ -64,13 +65,25 @@ async def handle_contact_lookup(message, user: dict, text: str) -> bool:
     if not names:
         return False
 
-    output = []
+    rows = []
     for name in names:
         phones = _find_phones(user["id"], name)
-        output.extend(phones)
+        if phones:
+            rows.append((name.title(), phones[0]))
 
-    if output:
-        await message.reply_text("\n".join(dict.fromkeys(output)))
+    if rows:
+        lines = ["<b>👤  CONTACT DETAILS</b>", "━━━━━━━━━━━━━━━━━━━━"]
+        lines.extend(f"• {_safe_name(name)}: <code>{_safe_phone(phone)}</code>" for name, phone in rows)
+        lines.append("━━━━━━━━━━━━━━━━━━━━")
+        await message.reply_text("\n".join(lines), parse_mode="HTML")
     else:
         await message.reply_text("Number nahi mila.")
     return True
+
+
+def _safe_name(value: str) -> str:
+    return html.escape(value, quote=False)
+
+
+def _safe_phone(value: str) -> str:
+    return html.escape(value, quote=False)
