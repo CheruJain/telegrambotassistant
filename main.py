@@ -13,6 +13,7 @@ from app.bot.date_details_handler import handle_date_details
 from app.bot.natural_reminder_handler import handle_natural_call_reminder
 from app.bot.sales_update_handler import (_handle_selection,_extract_name,_is_cancel_message,_is_update_message,handle_possible_sales_update)
 from app.bot.inline_actions import callback_handler
+from app.bot.pipeline import pipeline_cmd
 from app.bot.social_tracking import backlog_cmd, handle_social_state
 from app.reminders.scheduler import ReminderScheduler
 from app.reminders.social_scheduler import SocialScheduler
@@ -39,7 +40,7 @@ async def _handle_all_text(update,context):
     await handle_text_message(update,context)
 def build_application()->Application:
     application=Application.builder().token(settings.TELEGRAM_BOT_TOKEN).post_init(_post_init).build()
-    application.add_handler(CommandHandler("start",cmd.start_cmd));application.add_handler(CommandHandler("help",cmd.help_cmd));application.add_handler(CommandHandler("today",cmd.today_cmd));application.add_handler(CommandHandler("summary",cmd.summary_cmd));application.add_handler(CommandHandler("meetings",cmd.meetings_cmd));application.add_handler(CommandHandler("reminders",cmd.reminders_cmd));application.add_handler(CommandHandler("pending",cmd.pending_cmd));application.add_handler(CommandHandler("followups",cmd.pending_cmd));application.add_handler(CommandHandler("stats",cmd.stats_cmd));application.add_handler(CommandHandler("backlog_social",backlog_cmd));application.add_handler(CallbackQueryHandler(callback_handler));application.add_handler(MessageHandler(filters.VOICE,handle_voice_message));application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,_handle_all_text));return application
+    application.add_handler(CommandHandler("start",cmd.start_cmd));application.add_handler(CommandHandler("help",cmd.help_cmd));application.add_handler(CommandHandler("today",cmd.today_cmd));application.add_handler(CommandHandler("summary",cmd.summary_cmd));application.add_handler(CommandHandler("meetings",cmd.meetings_cmd));application.add_handler(CommandHandler("reminders",cmd.reminders_cmd));application.add_handler(CommandHandler("pending",cmd.pending_cmd));application.add_handler(CommandHandler("followups",cmd.pending_cmd));application.add_handler(CommandHandler("stats",cmd.stats_cmd));application.add_handler(CommandHandler("pipeline",pipeline_cmd));application.add_handler(CommandHandler("backlog_social",backlog_cmd));application.add_handler(CallbackQueryHandler(callback_handler));application.add_handler(MessageHandler(filters.VOICE,handle_voice_message));application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,_handle_all_text));return application
 def main():
     app=build_application();logger.info("Starting Telegram AI Assistant (polling)...");app.run_polling(allowed_updates=["message","callback_query"])
 if __name__=="__main__": main()
