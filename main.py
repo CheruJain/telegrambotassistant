@@ -13,6 +13,7 @@ from app.bot import commands as cmd
 from app.bot.handlers import handle_text_message, handle_voice_message
 from app.bot.history_handler import handle_history_question
 from app.bot.contact_handler import handle_contact_lookup
+from app.bot.natural_reminder_handler import handle_natural_call_reminder
 from app.bot.sales_update_handler import (
     _handle_selection,
     _extract_name,
@@ -53,6 +54,8 @@ async def _handle_all_text(update, context):
         if await handle_contact_lookup(update.message, user, text):
             return
         if await handle_history_question(update.message, user, tz, text):
+            return
+        if await handle_natural_call_reminder(update.message, user, text):
             return
         name = _extract_name(text)
         is_meeting = bool(re.search(r"\bmeeting\b", text, re.I))
