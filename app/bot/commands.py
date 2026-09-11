@@ -1,5 +1,5 @@
 """
-Deterministic slash-commands. These never call the AI.
+Deterministic slash-commands with clean Telegram HTML output and inline actions.
 """
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from app.database import repository as repo
 from app.analytics.metrics import daily_summary_data, week_bounds
 from app.reports.weekly import format_weekly_report
 from app.config.settings import settings
+from app.bot.inline_actions import action_keyboard
 
 
 def _get_user(update: Update):
@@ -48,29 +49,23 @@ def _date_group_label(value: dt.date, today: dt.date) -> str:
     return f"📅  {value.strftime('%d %b %Y')}"
 
 
+def _clean_reminder(text: str):
+    value = re.sub(r"^Confirm attendance:\s*|^Reminder:\s*", "", text or "", flags=re.I).strip()
+    value = re.sub(r"\nPhone:\s*\+?[\d\s()-]+\s*$", "", value, flags=re.I).strip()
+    match = re.search(r"sales call at\s+(\d{1,2}:\d{2}\s*(?:AM|PM))", value, re.I)
+    if match:
+        name = re.split(r"\s*[—-]?\s*sales call at\s+", value, flags=re.I)[0].strip(" —-")
+        return name or value, f"Sales call at {match.group(1).upper()}"
+    return value, None
+
+
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = _get_user(update)
-    await update.message.reply_text(
-        f"Hey {user.get('name') or ''}! I'm your personal work & sales assistant.\n\n"
-        "Just talk to me naturally, e.g.:\n"
-        "\"Aaj 40 sales calls hui, 7 interested\"\n"
-        "\"Kal 4 baje Rahul ke saath call hai\"\n"
-        "\"LinkedIn pe ek post kari\"\n\n"
-        "Or use /help to see all commands."
-    )
+    await update.message.reply_text(f"Hey {user.get('name') or ''}! I'm your personal work & sales assistant.")
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Commands:\n"
-        "/today - today's summary\n"
-        "/summary - this week's performance + AI insights\n"
-        "/meetings - upcoming meetings\n"
-        "/reminders - pending reminders\n"
-        "/pending - pending follow-ups\n"
-        "/followups - same as /pending\n"
-        "/stats - quick stats for this week"
-    )
+    await update.message.reply_text("Commands:\n/start\n/help\n/today\n/summary\n/meetings\n/reminders\n/pending\n/followups\n/stats")
 
 
 async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -83,28 +78,17 @@ async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def _format_daily(data: dict, today: dt.date) -> str:
     c, s = data["content"], data["sales"]
-    lines = [
-        f"<b>⚡️ DAILY SNAPSHOT • {today.strftime('%d %b')}</b>",
-        "━━━━━━━━━━━━━━━━━━━━",
-        "",
-        "<b>🤝  MEETINGS</b>",
-    ]
+    lines = [f"<b>⚡️ DAILY SNAPSHOT • {today.strftime('%d %b')}</b>", "━━━━━━━━━━━━━━━━━━━━", "", "<b>🤝  MEETINGS</b>"]
     if data["meetings"]:
         tz = pytz.timezone(settings.DEFAULT_TIMEZONE)
         for m in data["meetings"]:
-            start = dt.datetime.fromisoformat(m["start_time"])
-            if start.tzinfo is None:
-                start = pytz.utc.localize(start)
-            start = start.astimezone(tz)
+            start = _local_dt(m["start_time"], tz)
             lines.append(f"• <b>{_fmt_time(start)}</b> ── {_safe(m.get('title') or 'Meeting')}")
     else:
         lines.append("• No meetings today")
-    lines.extend(["", "<b>📊  SALES PIPELINE</b>"])
-    lines.append(f"• Calls: {s['total_calls']}  |  Won: {s['won']}  |  Follow-ups: {s['follow_ups']}")
-    lines.extend(["", "<b>📝  CONTENT</b>"])
+    lines.extend(["", "<b>📊  SALES PIPELINE</b>", f"• Calls: {s['total_calls']}  |  Won: {s['won']}  |  Follow-ups: {s['follow_ups']}", "", "<b>📝  CONTENT</b>"])
     if c["by_platform_account"]:
-        for k, v in c["by_platform_account"].items():
-            lines.append(f"• {_safe(k)}: {v}")
+        lines.extend(f"• {_safe(k)}: {v}" for k, v in c["by_platform_account"].items())
     else:
         lines.append("• No logs today")
     lines.extend(["", "<b>⏳  PENDING</b>", f"• {len(data['pending_reminders'])} Reminders in queue", "━━━━━━━━━━━━━━━━━━━━"])
@@ -114,53 +98,50 @@ def _format_daily(data: dict, today: dt.date) -> str:
 async def summary_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = _get_user(update)
     tz = _tz(user)
-    today = dt.datetime.now(tz).date()
     await update.message.reply_text("Crunching this week's numbers…")
-    await update.message.reply_text(format_weekly_report(user["id"], today))
+    await update.message.reply_text(format_weekly_report(user["id"], dt.datetime.now(tz).date()))
 
 
 async def meetings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = _get_user(update)
     tz = _tz(user)
     now = dt.datetime.now(tz)
-    end = now + dt.timedelta(days=7)
-    meetings = repo.get_meetings_in_range(user["id"], now.isoformat(), end.isoformat())
+    meetings = repo.get_meetings_in_range(user["id"], now.isoformat(), (now + dt.timedelta(days=7)).isoformat())
     if not meetings:
         await update.message.reply_text("No upcoming meetings in the next 7 days.")
         return
-
-    booked_by_date = {}
+    booked = {}
     for call in repo.get_sales_calls(user["id"], "2000-01-01", "2100-12-31"):
-        if call.get("outcome") != "Booked" or not call.get("lead_name") or not call.get("phone_number"):
-            continue
-        key = (call.get("booked_date"), str(call.get("booked_time") or "")[:5])
-        booked_by_date.setdefault(key, []).append(call)
-
-    grouped: dict[dt.date, list[str]] = {}
+        if call.get("outcome") == "Booked" and call.get("lead_name") and call.get("phone_number"):
+            booked.setdefault((call.get("booked_date"), str(call.get("booked_time") or "")[:5]), []).append(call)
+    groups = {}
     for meeting in meetings:
         start = _local_dt(meeting["start_time"], tz)
         title = (meeting.get("title") or "Meeting").strip()
         person = (meeting.get("person") or "").strip()
         display = title if not person or person.lower() in title.lower() else f"{title} with {person}"
         phones = []
-        for call in booked_by_date.get((start.date().isoformat(), start.strftime("%H:%M")), []):
+        for call in booked.get((start.date().isoformat(), start.strftime("%H:%M")), []):
             lead = (call.get("lead_name") or "").lower()
-            if person and (person.lower() in lead or lead in person.lower()):
+            if not person or person.lower() in lead or lead in person.lower():
                 phone = str(call.get("phone_number") or "").strip()
                 if phone and phone not in phones:
                     phones.append(phone)
-        entry = f"• <b>{_fmt_time(start)}</b> ── {_safe(display)}"
-        if phones:
-            entry += "\n  📞 " + " | ".join(f"<code>{_safe(phone)}</code>" for phone in phones)
-        grouped.setdefault(start.date(), []).append(entry)
-
+        groups.setdefault(start.date(), []).append((start, display, phones))
     lines = ["<b>🤝  SCHEDULED MEETINGS</b>", "━━━━━━━━━━━━━━━━━━━━", ""]
-    for date_value in sorted(grouped):
+    for date_value in sorted(groups):
         lines.append(f"<b>{_date_group_label(date_value, now.date())}</b>")
-        lines.extend(grouped[date_value])
-        lines.append("")
+        for start, display, phones in sorted(groups[date_value], key=lambda x: x[0]):
+            lines.append(f"• <b>{_fmt_time(start)}</b> ── {_safe(display)}")
+            if phones:
+                lines.append("  📞 " + " | ".join(f"<code>{_safe(p)}</code>" for p in phones))
+            lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━━━")
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+    for date_value in sorted(groups):
+        for start, display, phones in sorted(groups[date_value], key=lambda x: x[0]):
+            if phones:
+                await update.message.reply_text(f"<b>{_safe(_fmt_time(start))} ── {_safe(display)}</b>", parse_mode="HTML", reply_markup=action_keyboard(phones[0]))
 
 
 async def reminders_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -171,65 +152,43 @@ async def reminders_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not reminders:
         await update.message.reply_text("No pending reminders.")
         return
-    booked_calls = [c for c in repo.get_sales_calls(user["id"], "2000-01-01", "2100-12-31") if c.get("outcome") == "Booked" and c.get("lead_name") and c.get("phone_number")]
+    booked = [c for c in repo.get_sales_calls(user["id"], "2000-01-01", "2100-12-31") if c.get("outcome") == "Booked" and c.get("lead_name") and c.get("phone_number")]
     now = dt.datetime.now(tz)
-    grouped: dict[dt.date, list[str]] = {}
+    grouped = {}
     for reminder in reminders:
         trigger = _local_dt(reminder["trigger_time"], tz)
-        raw_text = reminder.get("reminder_text") or "Reminder"
-        reminder_text = raw_text
+        raw = reminder.get("reminder_text") or "Reminder"
         phone = None
-        if "phone:" not in reminder_text.lower():
-            lead_matches = [c for c in booked_calls if c["lead_name"].lower() in reminder_text.lower() and c.get("booked_date") == trigger.date().isoformat()]
-            time_match = re.search(r"sales call at (\d{1,2}:\d{2})\s*(AM|PM)", reminder_text, re.I)
-            if time_match:
-                try:
-                    parsed_time = dt.datetime.strptime(f"{time_match.group(1)} {time_match.group(2).upper()}", "%I:%M %p").time()
-                    exact = [c for c in lead_matches if c.get("booked_time") and str(c["booked_time"])[:5] == parsed_time.strftime("%H:%M")]
-                    if exact:
-                        lead_matches = exact
-                except ValueError:
-                    pass
-            if len(lead_matches) == 1:
-                phone = str(lead_matches[0]["phone_number"]).strip()
-        else:
-            match = re.search(r"phone:\s*(\+?[\d\s()-]+)", reminder_text, re.I)
-            if match:
-                phone = match.group(1).strip()
-        value = re.sub(r"^Confirm attendance:\s*|^Reminder:\s*", "", reminder_text, flags=re.I).strip()
-        call_match = re.search(r"sales call at\s+(\d{1,2}:\d{2}\s*(?:AM|PM))", value, re.I)
-        if call_match:
-            name = re.split(r"\s*[—-]?\s*sales call at\s+", value, flags=re.I)[0].strip(" —-")
-            action = f"Sales call at {call_match.group(1).upper()}"
-            entry = f"• <b>{_fmt_time(trigger)}</b> ── {_safe(name)}"
-            if phone:
-                entry += f"\n  📞 <code>{_safe(phone)}</code>"
-            entry += f"\n  ↳ {_safe(action)}"
-        else:
-            value = re.sub(r"\nPhone:\s*\+?[\d\s()-]+\s*$", "", value, flags=re.I).strip()
-            entry = f"• <b>{_fmt_time(trigger)}</b> ── {_safe(value)}"
-            if phone:
-                entry += f"\n  📞 <code>{_safe(phone)}</code>"
-        grouped.setdefault(trigger.date(), []).append(entry)
+        lead_matches = [c for c in booked if c["lead_name"].lower() in raw.lower() and c.get("booked_date") == trigger.date().isoformat()]
+        if len(lead_matches) == 1:
+            phone = str(lead_matches[0].get("phone_number") or "").strip()
+        action, sub = _clean_reminder(raw)
+        grouped.setdefault(trigger.date(), []).append((trigger, action, sub, phone, reminder["id"]))
     lines = ["<b>🔔  PENDING REMINDERS</b>", "━━━━━━━━━━━━━━━━━━━━", ""]
+    action_items = []
     for date_value in sorted(grouped):
         lines.append(f"<b>{_date_group_label(date_value, now.date())}</b>")
-        lines.extend(grouped[date_value])
+        for trigger, action, sub, phone, reminder_id in sorted(grouped[date_value], key=lambda x: x[0]):
+            lines.append(f"• <b>{_fmt_time(trigger)}</b> ── {_safe(action)}")
+            if phone:
+                lines.append(f"  📞 <code>{_safe(phone)}</code>")
+            if sub:
+                lines.append(f"  ↳ {_safe(sub)}")
+            action_items.append((trigger, action, phone, reminder_id))
         lines.append("")
     lines.extend(["━━━━━━━━━━━━━━━━━━━━", f"<b>Total: {len(reminders)} reminders queued</b>"])
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+    for trigger, action, phone, reminder_id in action_items:
+        await update.message.reply_text(f"<b>{_fmt_time(trigger)} ── {_safe(action)}</b>", parse_mode="HTML", reply_markup=action_keyboard(phone, reminder_id))
 
 
 async def pending_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = _get_user(update)
-    followups = repo.get_pending_followups(user["id"])
-    if not followups:
+    rows = repo.get_pending_followups(user["id"])
+    if not rows:
         await update.message.reply_text("No pending follow-ups.")
         return
-    lines = ["PENDING FOLLOW-UPS", ""]
-    for f in followups:
-        lines.append(f"  • {f.get('lead_name') or 'Unknown lead'} — follow-up on {f.get('follow_up_date') or '?'} (source: {f.get('source') or '?'}, status: {f.get('outcome') or '?'})")
-    await update.message.reply_text("\n".join(lines))
+    await update.message.reply_text("<b>PENDING FOLLOW-UPS</b>\n\n" + "\n".join(f"• {_safe(r.get('lead_name') or 'Unknown lead')} — {_safe(r.get('follow_up_date') or '?')}" for r in rows), parse_mode="HTML")
 
 
 async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -240,5 +199,4 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from app.analytics.metrics import sales_summary, content_summary
     s = sales_summary(user["id"], start, end)
     c = content_summary(user["id"], start, end)
-    lines = [f"STATS ({start.strftime('%d-%b-%Y')} → {end.strftime('%d-%b-%Y')})", "", f"Calls: {s['total_calls']} | Interested: {s['interested']} | Won: {s['won']}", f"Conversion: {s['conversion_rate_pct']}% | Revenue: ₹{s['revenue_won']:,.0f}", f"Content posted: {sum(c['by_platform_account'].values())} | Reach: {c['total_reach']}"]
-    await update.message.reply_text("\n".join(lines))
+    await update.message.reply_text(f"STATS ({start:%d-%b-%Y} → {end:%d-%b-%Y})\n\nCalls: {s['total_calls']} | Interested: {s['interested']} | Won: {s['won']}\nConversion: {s['conversion_rate_pct']}% | Revenue: ₹{s['revenue_won']:,.0f}\nContent posted: {sum(c['by_platform_account'].values())} | Reach: {c['total_reach']}")
