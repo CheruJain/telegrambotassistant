@@ -112,6 +112,14 @@ async def meetings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not meetings:
         await update.message.reply_text("No upcoming meetings in the next 7 days.")
         return
+
+    booked_by_date = {}
+    for call in repo.get_sales_calls(user["id"], "2000-01-01", "2100-12-31"):
+        if call.get("outcome") != "Booked" or not call.get("lead_name") or not call.get("phone_number"):
+            continue
+        key = (call.get("booked_date"), str(call.get("booked_time") or "")[:5])
+        booked_by_date.setdefault(key, []).append(call)
+
     lines = ["UPCOMING MEETINGS (next 7 days)", ""]
     current_day = None
     for m in meetings:
@@ -130,12 +138,24 @@ async def meetings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             display = title
         lines.append(f"  {time_label} — {display}")
+
+        matches = booked_by_date.get((start.date().isoformat(), start.strftime("%H:%M")), [])
+        phones = []
+        for call in matches:
+            lead = (call.get("lead_name") or "").lower()
+            if person and (person.lower() in lead or lead in person.lower()):
+                phone = str(call.get("phone_number") or "").strip()
+                if phone and phone not in phones:
+                    phones.append(phone)
+        if phones:
+            lines.append(f"  Phone: {', '.join(phones)}")
     await update.message.reply_text("\n".join(lines))
 
 
 async def reminders_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = _get_user(update)
     tz = _tz(user)
+    repo.ensure_booking_confirmation_reminders(user["id"])
     reminders = repo.get_pending_reminders(user["id"])
     if not reminders:
         await update.message.reply_text("No pending reminders.")
@@ -158,33 +178,22 @@ async def reminders_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if c["lead_name"].lower() in reminder_text.lower()
                 and c.get("booked_date") == trigger.date().isoformat()
             ]
-
-            # If the reminder mentions the sales-call time, use it to identify
-            # the exact booked call when the same lead has multiple bookings.
             time_match = re.search(r"sales call at (\d{1,2}:\d{2})\s*(AM|PM)", reminder_text, re.I)
             if time_match:
                 try:
-                    parsed_time = dt.datetime.strptime(
-                        f"{time_match.group(1)} {time_match.group(2).upper()}",
-                        "%I:%M %p",
-                    ).time()
+                    parsed_time = dt.datetime.strptime(f"{time_match.group(1)} {time_match.group(2).upper()}", "%I:%M %p").time()
                     exact_matches = [
                         c for c in lead_matches
-                        if c.get("booked_time")
-                        and str(c["booked_time"])[:5] == parsed_time.strftime("%H:%M")
+                        if c.get("booked_time") and str(c["booked_time"])[:5] == parsed_time.strftime("%H:%M")
                     ]
                     if exact_matches:
                         lead_matches = exact_matches
                 except ValueError:
                     pass
-
             if len(lead_matches) == 1:
                 reminder_text = f"{reminder_text}\nPhone: {lead_matches[0]['phone_number']}"
 
-        lines.append(
-            f"• {trigger.strftime('%d-%b-%Y')} at "
-            f"{trigger.strftime('%I:%M %p').lstrip('0')} — {reminder_text}"
-        )
+        lines.append(f"• {trigger.strftime('%d-%b-%Y')} at {trigger.strftime('%I:%M %p').lstrip('0')} — {reminder_text}")
     await update.message.reply_text("\n".join(lines))
 
 
