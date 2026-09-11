@@ -1,4 +1,18 @@
-"""Create the three WhatsApp reminders for booked sales calls."""
+"""Create the three WhatsApp reminders for booked sales calls.
+
+Meta WhatsApp templates used by this module should contain these bodies:
+
+call_reminder_day_before (3 variables):
+Hi {{1}}, I’m messaging from Lumina, founded by Col. J. S. Suhag, to confirm your availability for our call tomorrow, {{2}}, at {{3}}. Please let me know if that time still works for you.
+
+call_reminder_day_of (3 variables):
+Hi {{1}}, I’m messaging from Lumina, founded by Col. J. S. Suhag, to confirm your availability for our call today at {{3}}. Please let me know if the timing still works for you.
+
+call_reminder_one_hour (2 variables):
+Hi {{1}}, I’m messaging from Lumina, founded by Col. J. S. Suhag. Just a quick reminder about our call at {{2}} today. Looking forward to speaking with you.
+
+The lead name is passed when available; otherwise "there" is used.
+"""
 from __future__ import annotations
 
 import datetime as dt
