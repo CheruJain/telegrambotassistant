@@ -13,6 +13,7 @@ from app.bot import commands as cmd
 from app.bot.handlers import handle_text_message, handle_voice_message
 from app.bot.history_handler import handle_history_question
 from app.bot.contact_handler import handle_contact_lookup
+from app.bot.date_details_handler import handle_date_details
 from app.bot.natural_reminder_handler import handle_natural_call_reminder
 from app.bot.sales_update_handler import (
     _handle_selection,
@@ -23,21 +24,14 @@ from app.bot.sales_update_handler import (
 )
 from app.reminders.scheduler import ReminderScheduler
 
-logging.basicConfig(
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", level=logging.INFO
-)
+logging.basicConfig(format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
 async def _post_init(application: Application):
     user = repo.get_or_create_user(settings.TELEGRAM_USER_ID, settings.USER_NAME)
     tz_name = user.get("timezone") or settings.DEFAULT_TIMEZONE
-    scheduler = ReminderScheduler(
-        bot=application.bot,
-        chat_id=settings.TELEGRAM_USER_ID,
-        user_id=user["id"],
-        tz_name=tz_name,
-    )
+    scheduler = ReminderScheduler(bot=application.bot, chat_id=settings.TELEGRAM_USER_ID, user_id=user["id"], tz_name=tz_name)
     scheduler.start()
     application.bot_data["scheduler"] = scheduler
     logger.info("Assistant ready for user %s", settings.TELEGRAM_USER_ID)
@@ -51,6 +45,8 @@ async def _handle_all_text(update, context):
     if text and update.effective_user.id == settings.TELEGRAM_USER_ID:
         user = repo.get_or_create_user(update.effective_user.id, update.effective_user.first_name)
         tz = pytz.timezone(user.get("timezone") or settings.DEFAULT_TIMEZONE)
+        if await handle_date_details(update.message, user, text):
+            return
         if await handle_contact_lookup(update.message, user, text):
             return
         if await handle_history_question(update.message, user, tz, text):
@@ -70,7 +66,6 @@ async def _handle_all_text(update, context):
 
 def build_application() -> Application:
     application = Application.builder().token(settings.TELEGRAM_BOT_TOKEN).post_init(_post_init).build()
-
     application.add_handler(CommandHandler("start", cmd.start_cmd))
     application.add_handler(CommandHandler("help", cmd.help_cmd))
     application.add_handler(CommandHandler("today", cmd.today_cmd))
