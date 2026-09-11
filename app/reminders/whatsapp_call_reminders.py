@@ -17,16 +17,22 @@ def _template_name(stage: str) -> str:
     }[stage]
 
 
+def _template_parameters(call: dict, stage: str, call_start: dt.datetime) -> list[str]:
+    name = str(call.get("lead_name") or "there")
+    date = call_start.strftime("%d %B")
+    time = call_start.strftime("%I:%M %p").lstrip("0")
+
+    if stage == "one_hour":
+        return [name, time]
+    return [name, date, time]
+
+
 def _payload(call: dict, stage: str, call_start: dt.datetime) -> str:
     return _MARKER + json.dumps(
         {
             "recipient": str(call["phone_number"]),
             "template": _template_name(stage),
-            "parameters": [
-                str(call.get("lead_name") or "there"),
-                call_start.strftime("%d-%b-%Y"),
-                call_start.strftime("%I:%M %p").lstrip("0"),
-            ],
+            "parameters": _template_parameters(call, stage, call_start),
             "stage": stage,
             "call_id": str(call["id"]),
         },
