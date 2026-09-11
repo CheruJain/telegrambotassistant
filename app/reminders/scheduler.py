@@ -1,19 +1,11 @@
 """
 Internal reminder + daily digest + weekly-report scheduler.
-
-Runs entirely inside this process using APScheduler:
-  1. A polling job every SCHEDULER_POLL_SECONDS checks the `reminders` table
-     for anything due and sends it via Telegram.
-  2. Every day at 6 AM, sends a daily plan with today's work context,
-     scheduled calls/meetings, and pending follow-ups.
-  3. Every day at 9:30 PM, sends today's activity plus tomorrow's calls,
-     meetings, tasks, and pending follow-ups.
-  4. A weekly cron job generates and sends the automatic weekly report.
 """
 from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import json
 import logging
 
 import pytz
@@ -25,6 +17,8 @@ from telegram.error import TelegramError
 from app.config.settings import settings
 from app.database import repository as repo
 from app.ai.parser import next_recurrence_time
+from app.integrations.whatsapp import whatsapp
+from app.reminders.whatsapp_call_reminders import ensure_whatsapp_call_reminders
 from app.reports.weekly import format_weekly_report
 
 logger = logging.getLogger(__name__)
@@ -88,8 +82,8 @@ class ReminderScheduler:
     async def _check_due_reminders(self):
         now = dt.datetime.now(self.tz)
         try:
-            # Repair missing booking confirmations before checking what is due.
             repo.ensure_booking_confirmation_reminders(self.user_id, now=now)
+            ensure_whatsapp_call_reminders(self.user_id, now=now)
             due = repo.get_due_reminders(now.isoformat())
         except Exception as e:
             logger.error("Failed to fetch due reminders: %s", e)
@@ -97,8 +91,22 @@ class ReminderScheduler:
 
         for reminder in due:
             try:
+                reminder_text = str(reminder.get("reminder_text") or "")
+                if reminder_text.startswith("__WHATSAPP_TEMPLATE__"):
+                    payload = json.loads(reminder_text[len("__WHATSAPP_TEMPLATE__"):])
+                    sent = whatsapp.send_template(
+                        payload["recipient"],
+                        payload["template"],
+                        payload.get("parameters", []),
+                    )
+                    if sent:
+                        repo.mark_reminder_sent(reminder["id"])
+                    else:
+                        logger.error("WhatsApp reminder %s was not sent", reminder.get("id"))
+                    continue
+
                 await self.bot.send_message(
-                    chat_id=self.chat_id, text=f"Reminder: {reminder['reminder_text']}"
+                    chat_id=self.chat_id, text=f"Reminder: {reminder_text}"
                 )
                 repo.mark_reminder_sent(reminder["id"])
 
@@ -126,7 +134,6 @@ class ReminderScheduler:
 
     def _build_digest_text(self, target_date: dt.date, data: dict, heading: str) -> str:
         lines = [heading, f"Date: {target_date.strftime('%d-%b-%Y')}", ""]
-
         activity = data.get("activity") or data.get("work") or []
         if activity:
             lines.append("Work / Activity:")
@@ -231,7 +238,6 @@ class ReminderScheduler:
         else:
             lines.append("  None")
         lines.append("")
-
         return "\n".join(lines).rstrip()
 
     def _build_followups(self) -> list[str]:
@@ -315,11 +321,9 @@ class ReminderScheduler:
             tomorrow = today + dt.timedelta(days=1)
             today_data = repo.get_daily_digest_data(self.user_id, today.isoformat())
             tomorrow_data = repo.get_daily_digest_data(self.user_id, tomorrow.isoformat())
-
             text = self._build_digest_text(today, today_data, "TODAY'S SUMMARY")
             text += "\n\n" + self._build_tomorrow_plan(tomorrow, tomorrow_data)
             text += "\n\n" + "\n".join(self._build_followups())
-
             await self.bot.send_message(chat_id=self.chat_id, text=text)
         except TelegramError as e:
             logger.error("Failed to send evening digest: %s", e)
