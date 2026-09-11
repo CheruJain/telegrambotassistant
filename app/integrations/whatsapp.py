@@ -1,11 +1,4 @@
-"""WhatsApp Business Cloud API integration.
-
-The bot can keep using Telegram exactly as before. Once a WhatsApp Business
-number is connected, enable this integration with environment variables and
-call ``send_text`` for outbound messages.
-
-No WhatsApp credentials are required until the integration is enabled.
-"""
+"""WhatsApp Business Cloud API integration."""
 from __future__ import annotations
 
 import json
@@ -17,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 
 class WhatsAppService:
-    """Small provider wrapper so the rest of the bot stays provider-agnostic."""
+    """Provider wrapper for outbound WhatsApp Business Cloud API messages."""
 
     def __init__(self) -> None:
         self.enabled = os.getenv("WHATSAPP_ENABLED", "false").lower() == "true"
@@ -35,27 +28,53 @@ class WhatsAppService:
             f"{self.phone_number_id}/messages"
         )
 
-    def send_text(self, recipient: str, text: str) -> bool:
-        """Send a plain text WhatsApp message.
+    @staticmethod
+    def _phone(recipient: str) -> str:
+        return "".join(ch for ch in str(recipient) if ch.isdigit())
 
-        Returns False instead of crashing the Telegram bot when WhatsApp is
-        not configured or the provider rejects the request.
-        """
+    def send_text(self, recipient: str, text: str) -> bool:
         if not self.configured:
             logger.info("WhatsApp is not configured; skipping outbound message")
             return False
-
-        phone = "".join(ch for ch in str(recipient) if ch.isdigit())
+        phone = self._phone(recipient)
         if not phone:
             logger.warning("Skipping WhatsApp message: invalid recipient")
             return False
-
         payload = {
             "messaging_product": "whatsapp",
             "to": phone,
             "type": "text",
             "text": {"preview_url": False, "body": text},
         }
+        return self._post(payload)
+
+    def send_template(self, recipient: str, template_name: str, parameters: list[str]) -> bool:
+        """Send an approved WhatsApp template message."""
+        if not self.configured:
+            logger.info("WhatsApp is not configured; skipping template message")
+            return False
+        phone = self._phone(recipient)
+        if not phone or not template_name:
+            logger.warning("Skipping WhatsApp template: invalid recipient/template")
+            return False
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": phone,
+            "type": "template",
+            "template": {
+                "name": template_name,
+                "language": {"code": os.getenv("WHATSAPP_TEMPLATE_LANGUAGE", "en_US")},
+                "components": [
+                    {
+                        "type": "body",
+                        "parameters": [{"type": "text", "text": str(value)} for value in parameters],
+                    }
+                ],
+            },
+        }
+        return self._post(payload)
+
+    def _post(self, payload: dict) -> bool:
         body = json.dumps(payload).encode("utf-8")
         req = request.Request(
             self._endpoint(),
