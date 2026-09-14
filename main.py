@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import re
+import time
 import pytz
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 from app.config.settings import settings
@@ -28,30 +29,15 @@ from app.reminders.social_scheduler import SocialScheduler
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     level=logging.INFO,
+    force=True,
 )
 logger = logging.getLogger(__name__)
 
 
 async def _initialize_services(application: Application):
-    """Initialize database-backed services without making process readiness depend on them.
-
-    Deploy Hatch treats a worker that exits during its startup stability window as a
-    failed deployment. Supabase/network hiccups must therefore be retried in-process
-    instead of terminating the Telegram polling process.
-    """
+    """Initialize database-backed services with retry instead of crashing startup."""
     if application.bot_data.get("services_initialized"):
         return
-
-    social_scheduler = SocialScheduler(
-        application.bot,
-        settings.TELEGRAM_USER_ID,
-        settings.DEFAULT_TIMEZONE,
-    )
-    try:
-        social_scheduler.start()
-        application.bot_data["social_scheduler"] = social_scheduler
-    except Exception:
-        logger.exception("Failed to start social scheduler")
 
     while not application.bot_data.get("services_initialized"):
         try:
@@ -61,19 +47,31 @@ async def _initialize_services(application: Application):
                 settings.USER_NAME,
             )
             tz_name = user.get("timezone") or settings.DEFAULT_TIMEZONE
-            scheduler = ReminderScheduler(
-                bot=application.bot,
-                chat_id=settings.TELEGRAM_USER_ID,
-                user_id=user["id"],
-                tz_name=tz_name,
-            )
-            scheduler.start()
-            application.bot_data["scheduler"] = scheduler
+
+            if not application.bot_data.get("social_scheduler"):
+                social_scheduler = SocialScheduler(
+                    application.bot,
+                    settings.TELEGRAM_USER_ID,
+                    tz_name,
+                )
+                social_scheduler.start()
+                application.bot_data["social_scheduler"] = social_scheduler
+
+            if not application.bot_data.get("scheduler"):
+                scheduler = ReminderScheduler(
+                    bot=application.bot,
+                    chat_id=settings.TELEGRAM_USER_ID,
+                    user_id=user["id"],
+                    tz_name=tz_name,
+                )
+                scheduler.start()
+                application.bot_data["scheduler"] = scheduler
+
             application.bot_data["services_initialized"] = True
             logger.info("Database and reminder services initialized successfully")
         except Exception:
             logger.exception(
-                "Service initialization failed; Telegram worker will stay alive and retry in 10 seconds"
+                "Service initialization failed; retrying in 10 seconds"
             )
             await asyncio.sleep(10)
 
@@ -141,13 +139,32 @@ def build_application() -> Application:
 
 
 def main():
-    try:
-        app = build_application()
-        logger.info("Starting Telegram AI Assistant (polling)...")
-        app.run_polling(allowed_updates=["message", "callback_query"])
-    except Exception:
-        logger.exception("Telegram AI Assistant terminated unexpectedly")
-        raise
+    """Run the worker continuously and recover from transient polling failures."""
+    restart_delay = 5
+    while True:
+        app = None
+        try:
+            logger.info("Starting Telegram AI Assistant (polling)...")
+            app = build_application()
+            logger.info("Telegram application built successfully; entering polling")
+            app.run_polling(allowed_updates=["message", "callback_query"])
+            logger.warning("Polling stopped without an exception; restarting")
+        except KeyboardInterrupt:
+            logger.info("Shutdown requested")
+            return
+        except Exception:
+            logger.exception(
+                "Telegram worker stopped unexpectedly; restarting in %s seconds",
+                restart_delay,
+            )
+        finally:
+            if app is not None:
+                try:
+                    app.stop_running()
+                except Exception:
+                    pass
+        time.sleep(restart_delay)
+        restart_delay = min(restart_delay * 2, 60)
 
 
 if __name__ == "__main__":
