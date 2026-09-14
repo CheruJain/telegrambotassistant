@@ -208,6 +208,13 @@ def main():
                 asyncio.run(_startup_diagnostics())
                 diagnostics_done = True
 
+            # Python 3.12 no longer creates a MainThread event loop implicitly.
+            # python-telegram-bot 21.4 calls asyncio.get_event_loop() inside
+            # run_polling(), so explicitly install a fresh loop after diagnostics
+            # (asyncio.run() closes and clears its loop) before every polling attempt.
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
             logger.info("Starting Telegram AI Assistant (polling)...")
             app = build_application()
             logger.info("Telegram application built successfully; entering polling")
