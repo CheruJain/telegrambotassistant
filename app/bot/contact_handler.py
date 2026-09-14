@@ -4,7 +4,7 @@ from __future__ import annotations
 import html
 import re
 
-from app.database.supabase_client import get_client
+from app.database.client import get_client
 
 _NUMBER_WORDS = r"(?:number|mumber|phone|mobile|contact)"
 _REQUEST_WORDS = r"(?:bhej(?:na)?|send|give|do|de(?:na)?|bata(?:na)?|bta(?:na)?|chahiye|\?)"
