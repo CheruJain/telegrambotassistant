@@ -43,9 +43,17 @@ _HOUR_WORD = re.compile(
 _BARE_HOUR = re.compile(r"\b(\d{1,2})(?::(\d{2}))?\s*o['’]?clock\b", re.IGNORECASE)
 
 
+def _model_name() -> str:
+    """Normalize deployment-provided model names for google-generativeai."""
+    name = (settings.AI_MODEL or "gemini-2.5-flash").strip()
+    if name.startswith("models/"):
+        name = name[len("models/"):]
+    return name
+
+
 def call_ai_json(system_prompt: str, user_content: str, max_tokens: int = 4096) -> dict:
     """Single Gemini AI call that must return valid JSON."""
-    model = genai.GenerativeModel(model_name=settings.AI_MODEL, system_instruction=system_prompt)
+    model = genai.GenerativeModel(model_name=_model_name(), system_instruction=system_prompt)
     response = model.generate_content(
         user_content,
         generation_config=genai.types.GenerationConfig(
@@ -78,100 +86,58 @@ def parse_message(text: str) -> dict:
 def resolve_datetime(
     phrase: Optional[str],
     tz_name: str = "Asia/Kolkata",
-    default_hour: int = 9,
     now: Optional[dt.datetime] = None,
 ) -> Optional[dt.datetime]:
-    """Resolve a Hindi/English/Hinglish date-time phrase."""
-    if not phrase or not phrase.strip():
+    if not phrase:
         return None
-
     tz = pytz.timezone(tz_name)
     now = now or dt.datetime.now(tz)
-    if now.tzinfo is None:
-        now = tz.localize(now)
+    value = str(phrase).strip()
+    lower = value.lower()
 
-    p = re.sub(r"(?<=\d)\s*;\s*(?=\d)", ":", phrase.strip().lower())
-    p = re.sub(r"\bbje\b", "baje", p)
-    base_date = now.date()
-    time_part: Optional[dt.time] = None
+    if lower in {"today", "aaj"}:
+        return now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if lower in {"tomorrow", "kal"}:
+        return (now + dt.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
 
-    if "parso" in p or ("din baad" in p and "2" in p):
-        base_date = now.date() + dt.timedelta(days=2)
-    elif "aaj" in p or "today" in p:
-        base_date = now.date()
-    elif "kal" in p:
-        base_date = now.date() + dt.timedelta(days=1)
-    elif "tomorrow" in p:
-        base_date = now.date() + dt.timedelta(days=1)
-    elif "yesterday" in p:
-        base_date = now.date() - dt.timedelta(days=1)
+    for weekday, weekday_rel in _WEEKDAYS.items():
+        if weekday in lower:
+            return now + relativedelta(weekday=weekday_rel(+1))
 
-    m = re.search(r"(\d+)\s*(minute|min|hour|hr|ghante|ghanta)s?\s*(mein|me|later|from now)?", p)
-    if m:
-        qty = int(m.group(1))
-        unit = m.group(2)
-        delta = dt.timedelta(minutes=qty) if unit.startswith("min") else dt.timedelta(hours=qty)
-        return now + delta
-
-    for word, wk in _WEEKDAYS.items():
-        if re.search(rf"\b{word}\b", p):
-            candidate = now + relativedelta(weekday=wk(0))
-            base_date = candidate.date()
-            break
-
-    hm = _HOUR_WORD.search(p) or _BARE_HOUR.search(p)
-    if hm and hm.group(1):
-        hour = int(hm.group(1))
-        minute = int(hm.group(2)) if hm.group(2) else 0
-        meridiem = (hm.group(3) or "").lower() if hm.lastindex and hm.lastindex >= 3 else ""
-        if meridiem == "pm" and hour < 12:
+    match = _HOUR_WORD.search(lower) or _BARE_HOUR.search(lower)
+    if match:
+        hour = int(match.group(1))
+        minute = int(match.group(2) or 0)
+        meridiem = (match.group(3) if len(match.groups()) >= 3 else None) or ""
+        if meridiem.lower() == "pm" and hour < 12:
             hour += 12
-        elif meridiem == "am" and hour == 12:
+        elif meridiem.lower() == "am" and hour == 12:
             hour = 0
-        elif meridiem in ("", "baje") and hour <= 7:
-            hour += 12
-        time_part = dt.time(hour=hour, minute=minute)
-
-    has_explicit_date = bool(
-        re.search(r"\b(?:kal|tomorrow|yesterday|aaj|today|parso)\b", p)
-        or re.search(r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\b", p)
-        or any(re.search(rf"\b{word}\b", p) for word in _WEEKDAYS)
-    )
-
-    # A bare time such as "2 baje" is a time-of-day request, never a date.
-    # If it has already passed today, move it to the next day rather than
-    # letting dateutil invent a past calendar date.
-    if time_part is not None and not has_explicit_date:
-        candidate = tz.localize(dt.datetime.combine(now.date(), time_part))
-        if candidate <= now:
+        base = now
+        if "tomorrow" in lower or "kal" in lower:
+            base += dt.timedelta(days=1)
+        candidate = tz.localize(dt.datetime.combine(base.date(), dt.time(hour, minute)))
+        if candidate <= now and not ("tomorrow" in lower or "kal" in lower):
             candidate += dt.timedelta(days=1)
         return candidate
 
-    if time_part is not None:
-        try:
-            date_phrase = _HOUR_WORD.sub(" ", p)
-            date_phrase = _BARE_HOUR.sub(" ", date_phrase)
-            parsed = dateparser.parse(date_phrase, fuzzy=True, default=now.replace(tzinfo=None))
-            if parsed is not None and re.search(r"\b\d{1,2}\s*(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)", p):
-                base_date = parsed.date()
-        except (ValueError, OverflowError, TypeError):
-            pass
-
-    if time_part is None:
-        try:
-            parsed = dateparser.parse(phrase, fuzzy=True, default=now.replace(tzinfo=None))
-            if parsed is not None:
-                candidate = tz.localize(parsed) if parsed.tzinfo is None else parsed
-                return candidate
-        except (ValueError, OverflowError, TypeError):
-            time_part = dt.time(hour=default_hour, minute=0)
-
-    return tz.localize(dt.datetime.combine(base_date, time_part))
+    try:
+        parsed = dateparser.parse(value, default=now.replace(tzinfo=None))
+        if parsed is None:
+            return None
+        if parsed.tzinfo is None:
+            return tz.localize(parsed)
+        return parsed.astimezone(tz)
+    except (ValueError, OverflowError):
+        return None
 
 
-def next_recurrence_time(current_trigger: dt.datetime, recurrence: str) -> dt.datetime:
-    if recurrence == "daily":
-        return current_trigger + dt.timedelta(days=1)
-    if recurrence and recurrence.startswith("weekly:"):
-        return current_trigger + dt.timedelta(days=7)
-    return current_trigger + dt.timedelta(days=1)
+def next_recurrence_time(trigger: dt.datetime, recurrence: str) -> dt.datetime:
+    value = str(recurrence or "").lower().strip()
+    if value in {"daily", "day", "every day"}:
+        return trigger + dt.timedelta(days=1)
+    if value in {"weekly", "week", "every week"}:
+        return trigger + dt.timedelta(weeks=1)
+    if value in {"monthly", "month", "every month"}:
+        return trigger + relativedelta(months=1)
+    return trigger
