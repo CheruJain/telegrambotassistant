@@ -38,7 +38,7 @@ class Settings:
     WHATSAPP_GRAPH_API_VERSION: str = os.getenv("WHATSAPP_GRAPH_API_VERSION", "v23.0")
 
     # --- Tunable defaults (overridable per-user in DB) ---
-    AI_MODEL: str = os.getenv("AI_MODEL", "gemini-2.5-flash")
+    AI_MODEL: str = os.getenv("AI_MODEL", "gemini-3.5-flash")
     DEFAULT_TIMEZONE: str = os.getenv("DEFAULT_TIMEZONE", "Asia/Kolkata")
     USER_NAME: str = os.getenv("USER_NAME", "there")
     WEEKLY_REPORT_DAY: str = os.getenv("WEEKLY_REPORT_DAY", "sun")  # mon..sun
