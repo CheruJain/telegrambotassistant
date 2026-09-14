@@ -1,12 +1,15 @@
 """Entrypoint. Run with: python main.py"""
 import asyncio
 import logging
+import os
 import re
 import time
 import pytz
+from telegram import Bot
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 from app.config.settings import settings
 from app.database import repository as repo
+from app.database.client import get_client
 from app.bot import commands as cmd
 from app.bot.handlers import handle_text_message, handle_voice_message, handle_reschedule_shortcut
 from app.bot.history_handler import handle_history_question
@@ -32,6 +35,62 @@ logging.basicConfig(
     force=True,
 )
 logger = logging.getLogger(__name__)
+
+
+async def _startup_diagnostics():
+    """Run explicit startup checks so deployment logs expose the real failure."""
+    logger.info("========== STARTUP DIAGNOSTICS ==========")
+
+    required = [
+        "TELEGRAM_BOT_TOKEN",
+        "TELEGRAM_USER_ID",
+        "AI_API_KEY",
+        "SUPABASE_URL",
+        "SUPABASE_KEY",
+    ]
+    for name in required:
+        present = bool(os.getenv(name))
+        logger.info("ENV CHECK %-24s: %s", name, "SET" if present else "MISSING")
+
+    logger.info("CONFIG CHECK AI_MODEL: %s", settings.AI_MODEL)
+
+    try:
+        logger.info("TELEGRAM CHECK: testing bot token with get_me()")
+        async with Bot(token=settings.TELEGRAM_BOT_TOKEN) as bot:
+            me = await bot.get_me()
+            logger.info(
+                "TELEGRAM CHECK: OK — bot_id=%s username=@%s",
+                me.id,
+                me.username,
+            )
+    except Exception:
+        logger.exception("TELEGRAM CHECK: FAILED")
+
+    try:
+        logger.info("SUPABASE CHECK: testing users table query")
+        result = await asyncio.to_thread(
+            lambda: get_client().table("users").select("id").limit(1).execute()
+        )
+        logger.info("SUPABASE CHECK: OK — rows=%s", len(result.data or []))
+    except Exception:
+        logger.exception("SUPABASE CHECK: FAILED")
+
+    try:
+        logger.info("GEMINI CHECK: testing configured model")
+        import google.generativeai as genai
+
+        genai.configure(api_key=settings.AI_API_KEY)
+        model = genai.GenerativeModel(model_name=settings.AI_MODEL)
+        response = await asyncio.to_thread(
+            model.generate_content,
+            "Reply with exactly: OK",
+        )
+        text = getattr(response, "text", "") or ""
+        logger.info("GEMINI CHECK: OK — response=%r", text[:80])
+    except Exception:
+        logger.exception("GEMINI CHECK: FAILED")
+
+    logger.info("========== END STARTUP DIAGNOSTICS ==========")
 
 
 async def _initialize_services(application: Application):
@@ -141,9 +200,14 @@ def build_application() -> Application:
 def main():
     """Run the worker continuously and recover from transient polling failures."""
     restart_delay = 5
+    diagnostics_done = False
     while True:
         app = None
         try:
+            if not diagnostics_done:
+                asyncio.run(_startup_diagnostics())
+                diagnostics_done = True
+
             logger.info("Starting Telegram AI Assistant (polling)...")
             app = build_application()
             logger.info("Telegram application built successfully; entering polling")
